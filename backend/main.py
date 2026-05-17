@@ -37,7 +37,11 @@ os.makedirs(uploads_dir, exist_ok=True)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        "https://kismarykill.vercel.app",
+        "https://www.kissmarrykil.com",
+        "https://kissmarrykil.com",
+    ],
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
