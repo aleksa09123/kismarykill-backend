@@ -2,5 +2,5 @@
 builder = "NIXPACKS"
 
 [deploy]
-startCommand = "python backend/main.py"
+startCommand = "python main.py"
 restartOnPullRequest = true
