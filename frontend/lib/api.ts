@@ -14,7 +14,7 @@ import type {
   ZoneDebugResponse
 } from "@/lib/types";
 
-const API_BASE_URL = "https://backend-production-e0bd8.up.railway.app";
+const API_BASE_URL = "https://backend-production-766d.up.railway.app";
 
 const REQUEST_TIMEOUT_MS = 60000;
 const NO_CACHE_HEADERS = {
