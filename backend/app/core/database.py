@@ -13,7 +13,42 @@ from app.models.user import User
 from app.models.vote import Vote
 
 
-def _resolved_database_url() -> URL:
+def _query_value(value: str | tuple[str, ...] | None) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, tuple):
+        return value[0] if value else None
+    return value
+
+
+def _sanitize_postgres_url_for_asyncpg(url: URL) -> tuple[URL, dict[str, object]]:
+    if url.get_backend_name() != "postgresql":
+        return url, {}
+
+    query = dict(url.query)
+    connect_args: dict[str, object] = {
+        # Keeps asyncpg stable on managed Postgres instances.
+        "server_settings": {"jit": "off"}
+    }
+
+    # Managed providers sometimes append this and asyncpg can reject it.
+    query.pop("target_session_attrs", None)
+
+    ssl = _query_value(query.pop("ssl", None))
+    sslmode = _query_value(query.pop("sslmode", None))
+    requested_ssl = (ssl or sslmode or "").strip().lower()
+
+    if requested_ssl:
+        if requested_ssl in {"disable", "false", "0", "off"}:
+            connect_args["ssl"] = False
+        else:
+            # Convert libpq-style SSL modes to asyncpg-compatible SSL setting.
+            connect_args["ssl"] = "require"
+
+    return url.set(query=query), connect_args
+
+
+def _resolved_database_config() -> tuple[URL, dict[str, object]]:
     raw_database_url = (
         os.environ.get("DATABASE_PRIVATE_URL")
         or os.environ.get("DATABASE_URL")
@@ -27,18 +62,23 @@ def _resolved_database_url() -> URL:
         url = url.set(drivername="postgresql+asyncpg")
 
     if url.get_backend_name() != "sqlite" or not url.database:
-        return url
+        return _sanitize_postgres_url_for_asyncpg(url)
 
     sqlite_path = Path(url.database)
     if sqlite_path.is_absolute():
-        return url
+        return url, {}
 
     absolute_path = (BACKEND_DIR / sqlite_path).resolve()
-    return url.set(database=str(absolute_path))
+    return url.set(database=str(absolute_path)), {}
 
 
-DATABASE_URL = _resolved_database_url()
-engine = create_async_engine(DATABASE_URL, future=True, pool_pre_ping=True)
+DATABASE_URL, DATABASE_CONNECT_ARGS = _resolved_database_config()
+engine = create_async_engine(
+    DATABASE_URL,
+    future=True,
+    pool_pre_ping=True,
+    connect_args=DATABASE_CONNECT_ARGS,
+)
 AsyncSessionLocal = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 IS_SQLITE = DATABASE_URL.get_backend_name() == "sqlite"
 
