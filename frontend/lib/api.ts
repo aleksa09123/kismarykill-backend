@@ -17,6 +17,16 @@ import type {
 const API_BASE_URL = "https://backend-production-e0bd8.up.railway.app";
 
 const REQUEST_TIMEOUT_MS = 60000;
+const NO_CACHE_HEADERS = {
+  "Cache-Control": "no-cache, no-store, max-age=0",
+  Pragma: "no-cache",
+  Expires: "0"
+};
+
+function withCacheBuster(path: string): string {
+  const separator = path.includes("?") ? "&" : "?";
+  return `${path}${separator}t=${Date.now()}`;
+}
 
 function errorMessageFromUnknown(value: unknown): string | null {
   if (typeof value === "string" && value.trim()) {
@@ -97,9 +107,10 @@ export async function registerUser(payload: RegisterRequest): Promise<RegisterSt
   alertConnectingToApi();
   try {
     return await request<RegisterStartResponse>(
-      "/register",
+      withCacheBuster("/register"),
       {
         method: "POST",
+        headers: NO_CACHE_HEADERS,
         body: JSON.stringify(payload)
       },
       undefined
@@ -114,9 +125,10 @@ export async function verifyRegistration(payload: VerifyRegistrationRequest): Pr
   alertConnectingToApi();
   try {
     return await request<AuthResponse>(
-      "/register/verify",
+      withCacheBuster("/register/verify"),
       {
         method: "POST",
+        headers: NO_CACHE_HEADERS,
         body: JSON.stringify(payload)
       },
       undefined
@@ -131,9 +143,10 @@ export async function loginUser(payload: LoginRequest): Promise<AuthResponse> {
   alertConnectingToApi();
   try {
     return await request<AuthResponse>(
-      "/login",
+      withCacheBuster("/login"),
       {
         method: "POST",
+        headers: NO_CACHE_HEADERS,
         body: JSON.stringify(payload)
       },
       undefined
