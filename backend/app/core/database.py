@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncGenerator
+import os
 from pathlib import Path
 
 from sqlalchemy.engine import URL, make_url
@@ -13,7 +14,11 @@ from app.models.vote import Vote
 
 
 def _resolved_database_url() -> URL:
-    raw_database_url = settings.database_url.strip()
+    raw_database_url = (
+        os.environ.get("DATABASE_PRIVATE_URL")
+        or os.environ.get("DATABASE_URL")
+        or settings.database_url
+    ).strip()
     if raw_database_url.startswith("postgres://"):
         raw_database_url = "postgresql://" + raw_database_url[len("postgres://") :]
 

@@ -12,7 +12,10 @@ BACKEND_DIR = Path(__file__).resolve().parents[2]
 
 class Settings(BaseSettings):
     app_name: str = "Kiss Marry Kill API"
-    database_url: str = "postgresql+asyncpg://postgres:postgres@127.0.0.1:5432/kismarykill"
+    database_url: str = Field(
+        default="postgresql+asyncpg://postgres:postgres@127.0.0.1:5432/kismarykill",
+        validation_alias=AliasChoices("DATABASE_PRIVATE_URL", "DATABASE_URL", "database_url"),
+    )
     zone_radius_km: int = 20
     round_size: int = 3
     resend_api_key: str | None = Field(
