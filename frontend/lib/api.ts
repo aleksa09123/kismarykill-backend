@@ -14,11 +14,7 @@ import type {
   ZoneDebugResponse
 } from "@/lib/types";
 
-const API_BASE_URL = (process.env.NEXT_PUBLIC_API_URL ?? "").replace(/\/$/, "");
-
-if (!API_BASE_URL) {
-  throw new Error("NEXT_PUBLIC_API_URL is not configured.");
-}
+const API_BASE_URL = "https://backend-production-e0bd8.up.railway.app";
 
 const REQUEST_TIMEOUT_MS = 60000;
 
@@ -77,9 +73,7 @@ async function request<T>(path: string, init: RequestInit, accessToken?: string)
       throw new Error("Request timed out. Please check phone Wi-Fi and backend server availability.");
     }
 
-    throw new Error(
-      `Could not reach API at ${API_BASE_URL}. Check NEXT_PUBLIC_API_URL and backend CORS settings.`
-    );
+    throw new Error(`Could not reach API at ${API_BASE_URL}. Check API_BASE_URL and backend CORS settings.`);
   } finally {
     clearTimeout(timeoutId);
   }
