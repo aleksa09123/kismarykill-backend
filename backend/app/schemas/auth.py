@@ -14,7 +14,6 @@ class RegisterRequest(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     gender: GenderValue
     preferred_gender: PreferredGenderValue = "both"
-    profile_image_url: str | None = Field(default=None, max_length=500)
 
     @field_validator("email")
     @classmethod
@@ -47,6 +46,7 @@ class AuthUser(BaseModel):
     profile_image_url: str | None = None
     otp_verified: bool = True
     face_verified: bool = False
+    is_premium: bool = False
     rounds_played: int = 0
 
 
@@ -97,4 +97,3 @@ class UpdateProfileRequest(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=120)
     gender: GenderValue | None = None
     preferred_gender: PreferredGenderValue | None = None
-    profile_image_url: str | None = Field(default=None, max_length=500)

@@ -25,7 +25,6 @@ export function AuthPanel({ onAuthenticated, initialMode = "login", lockMode = f
   const [name, setName] = useState("");
   const [gender, setGender] = useState<Gender>("male");
   const [preferredGender, setPreferredGender] = useState<PreferredGender>("both");
-  const [profileImageUrl, setProfileImageUrl] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -52,8 +51,7 @@ export function AuthPanel({ onAuthenticated, initialMode = "login", lockMode = f
             password,
             name: name.trim(),
             gender,
-            preferred_gender: preferredGender,
-            profile_image_url: profileImageUrl.trim() || undefined
+            preferred_gender: preferredGender
           });
           setPendingEmail(response.email);
           setRegisterStep("verify");
@@ -210,17 +208,6 @@ export function AuthPanel({ onAuthenticated, initialMode = "login", lockMode = f
                 </select>
               </label>
             </div>
-
-            <label className="block">
-              <span className="mb-1 block text-sm font-medium text-slate-700">Profile image URL (optional)</span>
-              <input
-                type="url"
-                value={profileImageUrl}
-                onChange={(event) => setProfileImageUrl(event.target.value)}
-                className="min-h-11 w-full rounded-xl border border-slate-300 px-3 text-slate-900 outline-none ring-orange-500 transition focus:ring"
-                placeholder="https://i.pravatar.cc/300?u=my-id"
-              />
-            </label>
           </>
         )}
 

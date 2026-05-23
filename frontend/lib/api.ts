@@ -1,20 +1,22 @@
 import type {
+  BotFeedbackResponse,
   AuthResponse,
   AuthUser,
-  GetRoundRequest,
   GetRoundResponse,
   LeaderboardResponse,
   LoginRequest,
+  LocationOptionCountry,
+  LocationSelectionResponse,
   RegisterRequest,
   RegisterStartResponse,
   UpdateProfileRequest,
   VerifyRegistrationRequest,
   VoteRoundRequest,
-  VoteRoundResponse,
-  ZoneDebugResponse
+  VoteRoundResponse
 } from "@/lib/types";
 
-const API_BASE_URL = "https://backend-production-766d.up.railway.app";
+const rawApiBaseUrl = process.env.NEXT_PUBLIC_API_URL?.trim() ?? "";
+export const API_BASE_URL = rawApiBaseUrl.replace(/\/+$/, "");
 
 const REQUEST_TIMEOUT_MS = 60000;
 const NO_CACHE_HEADERS = {
@@ -56,12 +58,16 @@ function alertAuthError(error: unknown): void {
 }
 
 function alertConnectingToApi(): void {
-  if (typeof window !== "undefined" && typeof window.alert === "function") {
+  if (typeof window !== "undefined" && typeof window.alert === "function" && API_BASE_URL) {
     window.alert(`Connecting to: ${API_BASE_URL}...`);
   }
 }
 
 async function request<T>(path: string, init: RequestInit, accessToken?: string): Promise<T> {
+  if (!API_BASE_URL) {
+    throw new Error("Missing NEXT_PUBLIC_API_URL. Add it in frontend/.env.local and Vercel Environment Variables.");
+  }
+
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
   let response: Response;
@@ -74,7 +80,7 @@ async function request<T>(path: string, init: RequestInit, accessToken?: string)
         ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
         ...(init.headers ?? {})
       },
-      credentials: "omit",
+      credentials: "include",
       cache: "no-store",
       signal: controller.signal
     });
@@ -83,7 +89,7 @@ async function request<T>(path: string, init: RequestInit, accessToken?: string)
       throw new Error("Request timed out. Please check phone Wi-Fi and backend server availability.");
     }
 
-    throw new Error(`Could not reach API at ${API_BASE_URL}. Check API_BASE_URL and backend CORS settings.`);
+    throw new Error(`Could not reach API at ${API_BASE_URL}. Check NEXT_PUBLIC_API_URL and backend CORS settings.`);
   } finally {
     clearTimeout(timeoutId);
   }
@@ -157,23 +163,14 @@ export async function loginUser(payload: LoginRequest): Promise<AuthResponse> {
   }
 }
 
-export async function fetchRound(payload: GetRoundRequest, accessToken: string): Promise<GetRoundResponse> {
-  const params = new URLSearchParams({
-    latitude: String(payload.location.latitude),
-    longitude: String(payload.location.longitude)
-  });
-  const response = await request<GetRoundResponse>(
-    `/profiles?${params.toString()}`,
+export async function fetchRound(accessToken: string): Promise<GetRoundResponse> {
+  return request<GetRoundResponse>(
+    "/profiles",
     {
-      method: "GET",
-      headers: {
-        "x-latitude": String(payload.location.latitude),
-        "x-longitude": String(payload.location.longitude)
-      }
+      method: "GET"
     },
     accessToken
   );
-  return response;
 }
 
 export async function submitRoundVotes(payload: VoteRoundRequest, accessToken: string): Promise<VoteRoundResponse> {
@@ -218,7 +215,55 @@ export async function fetchLeaderboard(accessToken: string) {
   );
 }
 
+export async function fetchBotFeedback(accessToken: string): Promise<BotFeedbackResponse> {
+  return request<BotFeedbackResponse>(
+    "/bot-feedback",
+    {
+      method: "GET"
+    },
+    accessToken
+  );
+}
+
+export async function fetchLocationOptions(): Promise<LocationOptionCountry[]> {
+  return request<LocationOptionCountry[]>(
+    "/location/options",
+    {
+      method: "GET"
+    },
+    undefined
+  );
+}
+
+export async function fetchCurrentLocation(accessToken: string): Promise<LocationSelectionResponse> {
+  return request<LocationSelectionResponse>(
+    "/location/current",
+    {
+      method: "GET"
+    },
+    accessToken
+  );
+}
+
+export async function setCurrentLocation(
+  payload: { country_code: string; country_name?: string; city: string },
+  accessToken: string
+): Promise<LocationSelectionResponse> {
+  return request<LocationSelectionResponse>(
+    "/location/select",
+    {
+      method: "POST",
+      body: JSON.stringify(payload)
+    },
+    accessToken
+  );
+}
+
 export async function uploadProfilePicture(file: File, accessToken: string): Promise<AuthUser> {
+  if (!API_BASE_URL) {
+    throw new Error("Missing NEXT_PUBLIC_API_URL. Add it in frontend/.env.local and Vercel Environment Variables.");
+  }
+
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
   const formData = new FormData();
@@ -231,7 +276,7 @@ export async function uploadProfilePicture(file: File, accessToken: string): Pro
       headers: {
         ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {})
       },
-      credentials: "omit",
+      credentials: "include",
       cache: "no-store",
       signal: controller.signal
     });
@@ -261,31 +306,4 @@ export async function uploadProfilePicture(file: File, accessToken: string): Pro
   } finally {
     clearTimeout(timeoutId);
   }
-}
-
-export async function fetchZoneDebug(
-  accessToken: string,
-  location?: { latitude: number; longitude: number }
-): Promise<ZoneDebugResponse> {
-  const params = new URLSearchParams();
-  const headers: Record<string, string> = {};
-
-  if (location) {
-    params.set("latitude", String(location.latitude));
-    params.set("longitude", String(location.longitude));
-    headers["x-latitude"] = String(location.latitude);
-    headers["x-longitude"] = String(location.longitude);
-  }
-
-  const suffix = params.toString();
-  const path = suffix ? `/debug/zone?${suffix}` : "/debug/zone";
-
-  return request<ZoneDebugResponse>(
-    path,
-    {
-      method: "GET",
-      headers
-    },
-    accessToken
-  );
 }

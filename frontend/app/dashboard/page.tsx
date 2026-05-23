@@ -3,45 +3,341 @@
 import Image from "next/image";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { ChangeEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import { fetchCurrentUser, fetchRound, fetchZoneDebug, uploadProfilePicture } from "@/lib/api";
-import { clearSession, patchSessionUser, readSession, hasUnlockedProfilePhoto } from "@/lib/auth-session";
-import type { AuthResponse, AuthUser } from "@/lib/types";
+import { PremiumLiveFeedModel } from "@/components/premium-live-feed-model";
+import { ReferralUnlockModal } from "@/components/referral-unlock-modal";
+import { fetchBotFeedback, fetchCurrentLocation, setCurrentLocation } from "@/lib/api";
+import { AUTH_STORAGE_KEY, hasUnlockedProfilePhoto, readSession, refreshSessionFromStorage } from "@/lib/auth-session";
+import { ENABLE_API_BOTS } from "@/lib/feature-flags";
+import { ACTIVE_GAME_MODE_STORAGE_KEY, readActiveGameMode, writeActiveGameMode } from "@/lib/game-mode";
+import type {
+  AuthResponse,
+  AuthUser,
+  BotFeedbackEntry,
+  BotFeedbackResponse,
+  LocationOptionCountry,
+  LocationSelectionResponse,
+  VoteType
+} from "@/lib/types";
 
-const FACE_NOT_DETECTED_MESSAGE = "Face not detected! Please upload a clear photo of your face to unlock PLAY.";
-const LAST_LOCATION_STORAGE_KEY = "kmk_last_location";
-const LAST_ZONE_ID_STORAGE_KEY = "kmk_last_zone_id";
-
-type Coordinates = {
-  latitude: number;
-  longitude: number;
+const reactionLabel: Record<VoteType, string> = {
+  kiss: "kissed",
+  marry: "married",
+  kill: "killed"
 };
 
-type LocationPermission = "unknown" | "prompt" | "granted" | "denied" | "unsupported";
+const reactionStyle: Record<VoteType, string> = {
+  kiss: "border-rose-400/35 bg-rose-500/15 text-rose-100",
+  marry: "border-emerald-400/35 bg-emerald-500/15 text-emerald-100",
+  kill: "border-red-400/35 bg-red-500/15 text-red-100"
+};
 
-function readStoredLocation(): Coordinates | null {
+const premiumFeedDescription = "Unlock your Live Feed to see exactly who Kissed, Married, or Killed you!";
+const LOCATION_SYNC_TIMEOUT_MS = 12000;
+const COUNTRIES_NOW_COUNTRIES_ENDPOINT = "https://countriesnow.space/api/v0.1/countries";
+const COUNTRIES_NOW_CITIES_ENDPOINT = "https://countriesnow.space/api/v0.1/countries/cities";
+const MAX_LOCATION_RESULTS = 250;
+const LOCATION_SELECTION_STORAGE_KEY = "kmk_selected_location_v1";
+const GLOBAL_LOCATION_OPTION: LocationOptionCountry = {
+  country_code: "GL",
+  country_name: "Global",
+  cities: ["Global"]
+};
+let cachedLocationOptions: LocationOptionCountry[] | null = null;
+let cachedCountryCitiesByCode: Record<string, string[]> | null = null;
+
+type CountriesNowCountry = {
+  country?: string;
+  iso2?: string;
+};
+
+type CountriesNowResponse<T> = {
+  error?: boolean;
+  msg?: string;
+  data?: T;
+};
+
+type IconProps = {
+  className?: string;
+};
+
+type PlayMode = "classic" | "vip";
+
+function readInitialSessionClient(): AuthResponse | null {
   if (typeof window === "undefined") {
     return null;
   }
+  return readSession();
+}
 
-  const raw = window.localStorage.getItem(LAST_LOCATION_STORAGE_KEY);
-  if (!raw) {
+function GlobeIcon({ className = "h-4 w-4" }: IconProps) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" className={className} aria-hidden>
+      <circle cx="12" cy="12" r="9" stroke="currentColor" strokeWidth="1.6" />
+      <path d="M3 12h18M12 3c2.8 3 2.8 15 0 18M12 3c-2.8 3-2.8 15 0 18" stroke="currentColor" strokeWidth="1.6" />
+    </svg>
+  );
+}
+
+function ChevronDownIcon({ className = "h-4 w-4" }: IconProps) {
+  return (
+    <svg viewBox="0 0 20 20" fill="none" className={className} aria-hidden>
+      <path d="m5.5 7.5 4.5 5 4.5-5" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function ChevronRightIcon({ className = "h-5 w-5" }: IconProps) {
+  return (
+    <svg viewBox="0 0 20 20" fill="none" className={className} aria-hidden>
+      <path d="m8 5 4.5 5L8 15" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function GamepadIcon({ className = "h-3.5 w-3.5" }: IconProps) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" className={className} aria-hidden>
+      <rect x="3.5" y="8" width="17" height="9" rx="4.5" stroke="currentColor" strokeWidth="1.8" />
+      <path d="M8 12h4M10 10v4" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+      <circle cx="16" cy="11" r="1" fill="currentColor" />
+      <circle cx="18" cy="13" r="1" fill="currentColor" />
+    </svg>
+  );
+}
+
+function LockIcon({ className = "h-4 w-4" }: IconProps) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" className={className} aria-hidden>
+      <rect x="5" y="10" width="14" height="10" rx="2.5" stroke="currentColor" strokeWidth="1.8" />
+      <path d="M8.5 10V7.8A3.5 3.5 0 0 1 12 4.3a3.5 3.5 0 0 1 3.5 3.5V10" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function PlayIcon({ className = "h-5 w-5" }: IconProps) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" className={className} aria-hidden>
+      <circle cx="12" cy="12" r="9" stroke="currentColor" strokeWidth="1.8" />
+      <path d="m10 8 6 4-6 4V8Z" fill="currentColor" />
+    </svg>
+  );
+}
+
+function TrophyIcon({ className = "h-5 w-5" }: IconProps) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" className={className} aria-hidden>
+      <path d="M7 5h10v3a5 5 0 0 1-10 0V5Z" stroke="currentColor" strokeWidth="1.8" />
+      <path d="M7 7H5a2 2 0 0 0 2 3m10-3h2a2 2 0 0 1-2 3" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+      <path d="M12 13v3m-3 3h6" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function SettingsIcon({ className = "h-5 w-5" }: IconProps) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" className={className} aria-hidden>
+      <path
+        d="M9.3 4.8 12 3l2.7 1.8 3.2-.2.9 3 2.6 2-1.1 3 1.1 3-2.6 2-.9 3-3.2-.2L12 21l-2.7-1.8-3.2.2-.9-3-2.6-2 1.1-3-1.1-3 2.6-2 .9-3 3.2.2Z"
+        stroke="currentColor"
+        strokeWidth="1.3"
+      />
+      <circle cx="12" cy="12" r="2.5" stroke="currentColor" strokeWidth="1.8" />
+    </svg>
+  );
+}
+
+function BoltIcon({ className = "h-4 w-4" }: IconProps) {
+  return (
+    <svg viewBox="0 0 24 24" fill="currentColor" className={className} aria-hidden>
+      <path d="M13.7 2 5 13h5.3L9.8 22 19 10.7h-5.2L13.7 2Z" />
+    </svg>
+  );
+}
+
+function CrownIcon({ className = "h-3.5 w-3.5" }: IconProps) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" className={className} aria-hidden>
+      <path d="m4 18 1.6-10 5.1 4 1.3-6 1.3 6 5.1-4L20 18H4Z" stroke="currentColor" strokeWidth="1.6" strokeLinejoin="round" />
+      <path d="M4 18h16" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+      <circle cx="5.6" cy="8" r="1.1" fill="currentColor" />
+      <circle cx="12" cy="6" r="1.1" fill="currentColor" />
+      <circle cx="18.4" cy="8" r="1.1" fill="currentColor" />
+    </svg>
+  );
+}
+
+function RingsIcon({ className = "h-14 w-14" }: IconProps) {
+  return (
+    <svg viewBox="0 0 80 80" fill="none" className={className} aria-hidden>
+      <defs>
+        <linearGradient id="ringsA" x1="0" y1="0" x2="1" y2="1">
+          <stop offset="0%" stopColor="#f8d477" />
+          <stop offset="60%" stopColor="#d99c42" />
+          <stop offset="100%" stopColor="#8e5a21" />
+        </linearGradient>
+      </defs>
+      <circle cx="30" cy="44" r="17" stroke="url(#ringsA)" strokeWidth="6" />
+      <circle cx="49" cy="36" r="17" stroke="url(#ringsA)" strokeWidth="6" />
+    </svg>
+  );
+}
+
+function LipsIcon({ className = "h-12 w-12" }: IconProps) {
+  return (
+    <svg viewBox="0 0 80 80" fill="none" className={className} aria-hidden>
+      <defs>
+        <linearGradient id="lipsA" x1="0" y1="0" x2="1" y2="1">
+          <stop offset="0%" stopColor="#fbe39b" />
+          <stop offset="50%" stopColor="#d7a760" />
+          <stop offset="100%" stopColor="#8f5f2f" />
+        </linearGradient>
+      </defs>
+      <path
+        d="M12 44c8-12 20-18 28-18s20 6 28 18c-8 6-20 11-28 11s-20-5-28-11Zm14 2c6-6 10-9 14-9s8 3 14 9c-6 4-10 6-14 6s-8-2-14-6Z"
+        fill="url(#lipsA)"
+      />
+    </svg>
+  );
+}
+
+function SkullIcon({ className = "h-16 w-16" }: IconProps) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" className={className} aria-hidden>
+      <defs>
+        <linearGradient id="skullA" x1="0" y1="0" x2="1" y2="1">
+          <stop offset="0%" stopColor="#f1f5ff" />
+          <stop offset="45%" stopColor="#b9b8df" />
+          <stop offset="100%" stopColor="#6f6798" />
+        </linearGradient>
+      </defs>
+      <path
+        d="M12 3.2c-4.7 0-8.5 3.7-8.5 8.2 0 3 1.7 5.6 4.3 7v1.9c0 1.4 1.1 2.5 2.5 2.5h3.4c1.4 0 2.5-1.1 2.5-2.5v-1.9a8 8 0 0 0 4.3-7c0-4.5-3.8-8.2-8.5-8.2Z"
+        fill="url(#skullA)"
+        stroke="#d7dcff"
+        strokeWidth="0.6"
+      />
+      <circle cx="9" cy="12" r="1.6" fill="#252845" />
+      <circle cx="15" cy="12" r="1.6" fill="#252845" />
+      <path d="M10.1 16.1h3.8a1.9 1.9 0 0 1-3.8 0Z" fill="#252845" />
+      <path d="M9.5 19.3h5M10.7 21h2.6" stroke="#252845" strokeWidth="1.2" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function readLocationCookieClient(): LocationSelectionResponse | null {
+  if (typeof document === "undefined") {
     return null;
   }
-
+  const item = document.cookie
+    .split("; ")
+    .find((chunk) => chunk.startsWith("user_location="));
+  if (!item) {
+    return null;
+  }
   try {
-    const parsed = JSON.parse(raw) as { latitude?: unknown; longitude?: unknown };
-    if (typeof parsed.latitude !== "number" || typeof parsed.longitude !== "number") {
+    const rawValue = item.split("=")[1] ?? "";
+    const parsed = JSON.parse(decodeURIComponent(rawValue)) as Partial<LocationSelectionResponse>;
+    if (!parsed.country_code || !parsed.country_name || !parsed.city) {
       return null;
     }
     return {
-      latitude: parsed.latitude,
-      longitude: parsed.longitude
+      country_code: parsed.country_code,
+      country_name: parsed.country_name,
+      city: parsed.city,
+      latitude: Number(parsed.latitude ?? 0),
+      longitude: Number(parsed.longitude ?? 0),
+      server_id:
+        typeof parsed.server_id === "string" && parsed.server_id.length > 0
+          ? parsed.server_id
+          : `${parsed.country_code.toLowerCase()}_${parsed.city.toLowerCase().replace(/\s+/g, "_")}`
     };
   } catch {
     return null;
   }
+}
+
+function buildServerId(countryCode: string, city: string): string {
+  return `${countryCode.toLowerCase()}_${city.toLowerCase().replace(/\s+/g, "_")}`;
+}
+
+function readPersistedLocationClient(): LocationSelectionResponse | null {
+  if (typeof window === "undefined") {
+    return null;
+  }
+  const raw = window.localStorage.getItem(LOCATION_SELECTION_STORAGE_KEY);
+  if (!raw) {
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(raw) as Partial<LocationSelectionResponse>;
+    if (!parsed.country_code || !parsed.country_name || !parsed.city) {
+      return null;
+    }
+    return {
+      country_code: parsed.country_code,
+      country_name: parsed.country_name,
+      city: parsed.city,
+      latitude: Number(parsed.latitude ?? 0),
+      longitude: Number(parsed.longitude ?? 0),
+      server_id:
+        typeof parsed.server_id === "string" && parsed.server_id.trim().length > 0
+          ? parsed.server_id
+          : buildServerId(parsed.country_code, parsed.city)
+    };
+  } catch {
+    return null;
+  }
+}
+
+function persistLocationClient(location: LocationSelectionResponse): void {
+  if (typeof window === "undefined") {
+    return;
+  }
+  window.localStorage.setItem(LOCATION_SELECTION_STORAGE_KEY, JSON.stringify(location));
+}
+
+function readInitialLocationClient(): LocationSelectionResponse | null {
+  return readPersistedLocationClient() ?? readLocationCookieClient();
+}
+
+function normalizeCountriesNowCountries(payload: CountriesNowResponse<unknown>): LocationOptionCountry[] {
+  const rows = Array.isArray(payload?.data) ? payload.data : [];
+  const byCode = new Map<string, LocationOptionCountry>();
+  rows.forEach((row) => {
+      if (!row || typeof row !== "object") {
+        return;
+      }
+      const next = row as CountriesNowCountry;
+      const countryName = typeof next.country === "string" ? next.country.trim() : "";
+      const countryCode = typeof next.iso2 === "string" ? next.iso2.trim().toUpperCase() : "";
+      if (!countryName || countryCode.length !== 2) {
+        return;
+      }
+      byCode.set(countryCode, {
+        country_code: countryCode,
+        country_name: countryName,
+        cities: []
+      });
+    });
+
+  const normalized = Array.from(byCode.values())
+    .sort((a, b) => a.country_name.localeCompare(b.country_name));
+
+  return [GLOBAL_LOCATION_OPTION, ...normalized];
+}
+
+function normalizeCities(payload: CountriesNowResponse<unknown>): string[] {
+  const rows = Array.isArray(payload?.data) ? payload.data : [];
+  const uniqueCities = new Set(
+    rows
+      .filter((city): city is string => typeof city === "string")
+      .map((city) => city.trim())
+      .filter((city) => city.length > 0)
+  );
+
+  return Array.from(uniqueCities).sort((a, b) => a.localeCompare(b));
 }
 
 function ProfileFallback() {
@@ -57,451 +353,1008 @@ function ProfileFallback() {
   );
 }
 
-function MenuCard({
-  title,
-  subtitle,
-  href,
-  onClick,
-  disabled = false,
-  locked = false,
-  glow = false
-}: {
-  title: string;
-  subtitle: string;
-  href?: string;
-  onClick?: () => void;
-  disabled?: boolean;
-  locked?: boolean;
-  glow?: boolean;
-}) {
-  const className = `group min-h-28 rounded-2xl border px-4 py-4 text-left backdrop-blur transition duration-200 hover:-translate-y-0.5 ${
-    locked
-      ? "animate-pulse border-orange-400/60 bg-orange-500/15 shadow-[0_0_30px_rgba(251,146,60,0.25)]"
-      : glow
-        ? "border-cyan-300/40 bg-cyan-400/10 shadow-[0_0_20px_rgba(56,189,248,0.2)]"
-        : "border-slate-600/40 bg-slate-900/45"
-  }`;
-
-  if (onClick) {
-    return (
-      <button
-        type="button"
-        onClick={onClick}
-        disabled={disabled}
-        className={`${className} disabled:cursor-not-allowed disabled:opacity-70`}
-      >
-        <p className="text-base font-semibold text-white">{title}</p>
-        <p className="mt-2 text-sm text-slate-300 group-hover:text-slate-100">{subtitle}</p>
-      </button>
-    );
-  }
-
-  return (
-    <Link
-      href={href || "/dashboard"}
-      className={className}
-    >
-      <p className="text-base font-semibold text-white">{title}</p>
-      <p className="mt-2 text-sm text-slate-300 group-hover:text-slate-100">{subtitle}</p>
-    </Link>
-  );
-}
-
 export default function DashboardPage() {
   const router = useRouter();
-  const [session, setSession] = useState<AuthResponse | null>(null);
-  const [user, setUser] = useState<AuthUser | null>(null);
-  const [isLoading, setIsLoading] = useState(true);
-  const [isUploadingPhoto, setIsUploadingPhoto] = useState(false);
+  const [session, setSession] = useState<AuthResponse | null>(() => readInitialSessionClient());
+  const [user, setUser] = useState<AuthUser | null>(() => readInitialSessionClient()?.user ?? null);
+  const [isMounted, setIsMounted] = useState(false);
   const [isStartingPlay, setIsStartingPlay] = useState(false);
-  const [uploadMessage, setUploadMessage] = useState<string | null>(null);
-  const [locationStatus, setLocationStatus] = useState<string | null>(null);
-  const [currentLocation, setCurrentLocation] = useState<Coordinates | null>(null);
-  const [locationPermission, setLocationPermission] = useState<LocationPermission>("unknown");
-  const [isRequestingLocation, setIsRequestingLocation] = useState(false);
-  const [zoneId, setZoneId] = useState<string | null>(null);
-  const [nearestDistanceKm, setNearestDistanceKm] = useState<number | null>(null);
+  const [isChangingLocation, setIsChangingLocation] = useState(false);
+  const [isReferralModalOpen, setIsReferralModalOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const lastSyncedLocationRef = useRef<string | null>(null);
+  const [botFeedback, setBotFeedback] = useState<BotFeedbackResponse | null>(null);
+  const [selectedMode, setSelectedMode] = useState<PlayMode>("classic");
+  const [currentLocation, setCurrentLocationState] = useState<LocationSelectionResponse | null>(() => readInitialLocationClient());
+
+  const [locationOptions, setLocationOptions] = useState<LocationOptionCountry[]>(() =>
+    cachedLocationOptions ?? [GLOBAL_LOCATION_OPTION]
+  );
+  const [countryCitiesByCode, setCountryCitiesByCode] = useState<Record<string, string[]>>(() =>
+    cachedCountryCitiesByCode ?? { [GLOBAL_LOCATION_OPTION.country_code]: GLOBAL_LOCATION_OPTION.cities }
+  );
+  const [isLoadingLocationOptions, setIsLoadingLocationOptions] = useState(true);
+  const [isLoadingCountryCities, setIsLoadingCountryCities] = useState(false);
+  const [countrySearchQuery, setCountrySearchQuery] = useState("");
+  const [citySearchQuery, setCitySearchQuery] = useState("");
+  const [isLocationPickerOpen, setIsLocationPickerOpen] = useState(false);
+  const [selectedCountryCode, setSelectedCountryCode] = useState<string>(() => readInitialLocationClient()?.country_code ?? "");
+  const [selectedCountryName, setSelectedCountryName] = useState<string>(() => readInitialLocationClient()?.country_name ?? "");
+  const [selectedCity, setSelectedCity] = useState<string>(() => readInitialLocationClient()?.city ?? "");
+  const locationUpdateRequestRef = useRef(0);
+  const locationOptionsRequestRef = useRef(0);
+  const locationCitiesRequestRef = useRef(0);
+  const dashboardSyncRequestRef = useRef(0);
+  const hasInitializedDashboardRef = useRef(false);
+  const hasHydratedModeRef = useRef(false);
+  const isComponentMountedRef = useRef(false);
+  const locationMenuRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
+    isComponentMountedRef.current = true;
+    setIsMounted(true);
+    return () => {
+      isComponentMountedRef.current = false;
+      dashboardSyncRequestRef.current += 1;
+      locationUpdateRequestRef.current += 1;
+      locationOptionsRequestRef.current += 1;
+      locationCitiesRequestRef.current += 1;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!isMounted) {
+      return;
+    }
+
+    const syncFromStorage = () => {
+      const refreshed = refreshSessionFromStorage();
+      if (refreshed) {
+        setSession(refreshed);
+        setUser(refreshed.user);
+      }
+
+      const nextLocation = readInitialLocationClient();
+      if (nextLocation) {
+        setCurrentLocationState(nextLocation);
+        setSelectedCountryCode(nextLocation.country_code);
+        setSelectedCountryName(nextLocation.country_name);
+        setSelectedCity(nextLocation.city);
+      }
+
+      setSelectedMode(readActiveGameMode());
+    };
+
+    const onStorage = (event: StorageEvent) => {
+      if (
+        event.key === null ||
+        event.key === AUTH_STORAGE_KEY ||
+        event.key === ACTIVE_GAME_MODE_STORAGE_KEY ||
+        event.key === LOCATION_SELECTION_STORAGE_KEY
+      ) {
+        syncFromStorage();
+      }
+    };
+
+    window.addEventListener("storage", onStorage);
+    window.addEventListener("focus", syncFromStorage);
+    return () => {
+      window.removeEventListener("storage", onStorage);
+      window.removeEventListener("focus", syncFromStorage);
+    };
+  }, [isMounted]);
+
+  useEffect(() => {
+    if (!isMounted) {
+      return;
+    }
+    if (session) {
+      return;
+    }
     const nextSession = readSession();
     if (!nextSession) {
       router.replace("/login");
       return;
     }
-
     setSession(nextSession);
     setUser(nextSession.user);
+  }, [isMounted, router, session]);
 
-    const loadCurrentUser = async () => {
+  useEffect(() => {
+    if (!isMounted) {
+      return;
+    }
+    if (!hasHydratedModeRef.current) {
+      hasHydratedModeRef.current = true;
+      return;
+    }
+    writeActiveGameMode(selectedMode);
+  }, [isMounted, selectedMode]);
+
+  useEffect(() => {
+    if (selectedMode === "vip") {
+      setBotFeedback(null);
+    }
+  }, [selectedMode]);
+
+  const loadLocationOptions = useCallback(async () => {
+    if (cachedLocationOptions) {
+      setLocationOptions(cachedLocationOptions);
+      setCountryCitiesByCode(
+        cachedCountryCitiesByCode ?? { [GLOBAL_LOCATION_OPTION.country_code]: GLOBAL_LOCATION_OPTION.cities }
+      );
+      setIsLoadingLocationOptions(false);
+      return;
+    }
+
+    const requestId = ++locationOptionsRequestRef.current;
+    setIsLoadingLocationOptions(true);
+    try {
+      const response = await fetch(COUNTRIES_NOW_COUNTRIES_ENDPOINT, {
+        method: "GET",
+        cache: "no-store"
+      });
+      if (!response.ok) {
+        throw new Error("Could not load global countries list.");
+      }
+      const payload = (await response.json()) as CountriesNowResponse<unknown>;
+      const normalizedCountries = normalizeCountriesNowCountries(payload);
+      if (requestId !== locationOptionsRequestRef.current || !isComponentMountedRef.current) {
+        return;
+      }
+      setLocationOptions(normalizedCountries);
+      cachedLocationOptions = normalizedCountries;
+    } catch {
+      if (requestId !== locationOptionsRequestRef.current || !isComponentMountedRef.current) {
+        return;
+      }
+      // Keep global selector available if public API is temporarily unavailable.
+      setLocationOptions([GLOBAL_LOCATION_OPTION]);
+    } finally {
+      if (requestId === locationOptionsRequestRef.current && isComponentMountedRef.current) {
+        setIsLoadingLocationOptions(false);
+      }
+    }
+  }, []);
+
+  const loadCitiesForCountry = useCallback(
+    async (country: LocationOptionCountry | null) => {
+      if (!country) {
+        return;
+      }
+      if (country.country_code === GLOBAL_LOCATION_OPTION.country_code) {
+        setCountryCitiesByCode((previous) =>
+          previous[GLOBAL_LOCATION_OPTION.country_code]
+            ? previous
+            : { ...previous, [GLOBAL_LOCATION_OPTION.country_code]: GLOBAL_LOCATION_OPTION.cities }
+        );
+        return;
+      }
+
+      if (cachedCountryCitiesByCode?.[country.country_code]?.length) {
+        setCountryCitiesByCode((previous) => ({
+          ...previous,
+          [country.country_code]: cachedCountryCitiesByCode?.[country.country_code] ?? []
+        }));
+        return;
+      }
+
+      if (countryCitiesByCode[country.country_code]?.length) {
+        return;
+      }
+
+      const requestId = ++locationCitiesRequestRef.current;
+      setIsLoadingCountryCities(true);
       try {
-        const nextUser = await fetchCurrentUser(nextSession.access_token);
-        setUser(nextUser);
-        patchSessionUser(nextUser);
-      } catch (loadError) {
-        const message = loadError instanceof Error ? loadError.message : "Unable to load profile.";
-        setError(message);
+        const response = await fetch(COUNTRIES_NOW_CITIES_ENDPOINT, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify({ country: country.country_name }),
+          cache: "no-store"
+        });
+        if (!response.ok) {
+          throw new Error("Could not load cities for selected country.");
+        }
+        const payload = (await response.json()) as CountriesNowResponse<unknown>;
+        const cities = normalizeCities(payload);
+
+        if (requestId !== locationCitiesRequestRef.current || !isComponentMountedRef.current) {
+          return;
+        }
+
+        setCountryCitiesByCode((previous) => ({ ...previous, [country.country_code]: cities }));
+        cachedCountryCitiesByCode = {
+          ...(cachedCountryCitiesByCode ?? {}),
+          [country.country_code]: cities
+        };
+        setLocationOptions((previous) =>
+          previous.map((option) => (option.country_code === country.country_code ? { ...option, cities } : option))
+        );
+        setSelectedCity((previous) => (previous && cities.includes(previous) ? previous : cities[0] ?? ""));
+      } catch {
+        if (requestId !== locationCitiesRequestRef.current || !isComponentMountedRef.current) {
+          return;
+        }
+        setCountryCitiesByCode((previous) => ({ ...previous, [country.country_code]: [] }));
       } finally {
-        setIsLoading(false);
+        if (requestId === locationCitiesRequestRef.current && isComponentMountedRef.current) {
+          setIsLoadingCountryCities(false);
+        }
+      }
+    },
+    [countryCitiesByCode]
+  );
+
+  useEffect(() => {
+    void loadLocationOptions();
+  }, [loadLocationOptions]);
+
+  useEffect(() => {
+    if (!session || hasInitializedDashboardRef.current) {
+      return;
+    }
+    hasInitializedDashboardRef.current = true;
+
+    const requestId = ++dashboardSyncRequestRef.current;
+    setError(null);
+
+    const syncDashboardContext = async () => {
+      const withTimeout = <T,>(promise: Promise<T>, fallbackMessage: string): Promise<T> =>
+        new Promise<T>((resolve, reject) => {
+          const timeoutId = window.setTimeout(() => {
+            reject(new Error(fallbackMessage));
+          }, LOCATION_SYNC_TIMEOUT_MS);
+          promise
+            .then((result) => {
+              window.clearTimeout(timeoutId);
+              resolve(result);
+            })
+            .catch((timeoutError) => {
+              window.clearTimeout(timeoutId);
+              reject(timeoutError);
+            });
+        });
+
+      const [locationResult, feedbackResult] = await Promise.allSettled([
+        withTimeout(fetchCurrentLocation(session.access_token), "Location sync timed out."),
+        ENABLE_API_BOTS && selectedMode !== "vip"
+          ? withTimeout(fetchBotFeedback(session.access_token), "Live feed sync timed out.")
+          : Promise.resolve(null)
+      ]);
+
+      if (requestId !== dashboardSyncRequestRef.current || !isComponentMountedRef.current) {
+        return;
+      }
+
+      if (locationResult.status === "fulfilled") {
+        const persistedLocation = readPersistedLocationClient();
+        const resolvedLocation =
+          persistedLocation &&
+          persistedLocation.country_code !== GLOBAL_LOCATION_OPTION.country_code &&
+          locationResult.value.country_code === GLOBAL_LOCATION_OPTION.country_code
+            ? persistedLocation
+            : locationResult.value;
+        setCurrentLocationState(resolvedLocation);
+        setSelectedCountryCode(resolvedLocation.country_code);
+        setSelectedCountryName(resolvedLocation.country_name);
+        setSelectedCity(resolvedLocation.city);
+        persistLocationClient(resolvedLocation);
+      }
+
+      if (ENABLE_API_BOTS && feedbackResult.status === "fulfilled") {
+        setBotFeedback(feedbackResult.value);
+      } else if (!ENABLE_API_BOTS) {
+        setBotFeedback(null);
+      } else if (selectedMode === "vip") {
+        setBotFeedback(null);
+      }
+
+      if (locationResult.status === "rejected" && feedbackResult.status === "rejected") {
+        setError("Unable to refresh dashboard context.");
       }
     };
 
-    void loadCurrentUser();
-  }, [router]);
+    void syncDashboardContext();
+  }, [selectedMode, session]);
 
   const playLocked = useMemo(
     () => !hasUnlockedProfilePhoto(user?.profile_image_url) || !user?.face_verified,
     [user?.face_verified, user?.profile_image_url]
   );
 
-  const logout = () => {
-    clearSession();
-    router.replace("/login");
-  };
+  const selectedCountry = useMemo(
+    () =>
+      locationOptions.find((country) => country.country_code === selectedCountryCode) ??
+      (selectedCountryCode === GLOBAL_LOCATION_OPTION.country_code ? GLOBAL_LOCATION_OPTION : null),
+    [locationOptions, selectedCountryCode]
+  );
+  const selectedCountryCities = useMemo(() => {
+    if (!selectedCountryCode) {
+      return [];
+    }
+    if (selectedCountryCode === GLOBAL_LOCATION_OPTION.country_code) {
+      return GLOBAL_LOCATION_OPTION.cities;
+    }
+    return countryCitiesByCode[selectedCountryCode] ?? selectedCountry?.cities ?? [];
+  }, [countryCitiesByCode, selectedCountry?.cities, selectedCountryCode]);
+  const filteredCountries = useMemo(() => {
+    const query = countrySearchQuery.trim().toLowerCase();
+    const list = query
+      ? locationOptions.filter((country) => country.country_name.toLowerCase().includes(query))
+      : locationOptions;
+    const limited = list.slice(0, MAX_LOCATION_RESULTS);
+    const selected = list.find((country) => country.country_code === selectedCountryCode);
+    if (selected && !limited.some((country) => country.country_code === selected.country_code)) {
+      return [selected, ...limited.slice(0, Math.max(0, MAX_LOCATION_RESULTS - 1))];
+    }
+    return limited;
+  }, [countrySearchQuery, locationOptions, selectedCountryCode]);
+  const filteredCities = useMemo(() => {
+    const query = citySearchQuery.trim().toLowerCase();
+    const list = query
+      ? selectedCountryCities.filter((city) => city.toLowerCase().includes(query))
+      : selectedCountryCities;
+    const limited = list.slice(0, MAX_LOCATION_RESULTS);
+    if (selectedCity && list.includes(selectedCity) && !limited.includes(selectedCity)) {
+      return [selectedCity, ...limited.slice(0, Math.max(0, MAX_LOCATION_RESULTS - 1))];
+    }
+    return limited;
+  }, [citySearchQuery, selectedCity, selectedCountryCities]);
+  const selectorCountryCode = selectedCountryCode || currentLocation?.country_code || GLOBAL_LOCATION_OPTION.country_code;
+  const selectorCity = selectedCity || currentLocation?.city || GLOBAL_LOCATION_OPTION.cities[0];
+  const connectedCountryLabel = selectedCountryName || currentLocation?.country_name || GLOBAL_LOCATION_OPTION.country_name;
+  const connectedCityLabel = selectedCity || currentLocation?.city || GLOBAL_LOCATION_OPTION.cities[0];
+  const referralTarget = 5;
+  const referralCount = Math.max(
+    0,
+    Math.floor(Number(user?.referralCount ?? user?.referral_count ?? 0))
+  );
+  const hasReferralUnlock = referralCount >= referralTarget;
+  const isPremiumUser = Boolean(user?.is_premium);
+  const shouldShowPaywall = user !== null && !isPremiumUser && !hasReferralUnlock;
+  const inviteRef = user?.id ?? user?.username?.trim() ?? "";
+  const referralLink = isMounted && inviteRef
+    ? `${window.location.origin}/register?ref=${encodeURIComponent(String(inviteRef))}`
+    : "";
 
-  const syncZoneDebug = useCallback(
-    async (coords?: Coordinates) => {
-      if (!session) {
+  useEffect(() => {
+    if (!shouldShowPaywall) {
+      setIsReferralModalOpen(false);
+    }
+  }, [shouldShowPaywall]);
+
+  const loadBotFeedback = useCallback(async () => {
+    if (!session || !ENABLE_API_BOTS || selectedMode === "vip") {
+      return;
+    }
+    try {
+      const summary = await fetchBotFeedback(session.access_token);
+      setBotFeedback(summary);
+    } catch {
+      // Keep dashboard usable even if feedback endpoint is temporarily unavailable.
+    }
+  }, [selectedMode, session]);
+
+  useEffect(() => {
+    if (!isLocationPickerOpen) {
+      return;
+    }
+    void loadCitiesForCountry(selectedCountry);
+  }, [isLocationPickerOpen, loadCitiesForCountry, selectedCountry]);
+
+  useEffect(() => {
+    if (!selectedCountryName && selectedCountry) {
+      setSelectedCountryName(selectedCountry.country_name);
+    }
+  }, [selectedCountry, selectedCountryName]);
+
+  const syncLocationAndRefreshContext = useCallback(
+    async (countryCode: string, city: string, keepModalOpen = true) => {
+      if (!session || !countryCode || !city) {
         return;
       }
+
+      const nextCountryName = selectedCountryName || selectedCountry?.country_name || countryCode;
+      const draftLocation: LocationSelectionResponse = {
+        country_code: countryCode,
+        country_name: nextCountryName,
+        city,
+        latitude: 0,
+        longitude: 0,
+        server_id: buildServerId(countryCode, city)
+      };
+
+      // Lock user choice immediately so the selector survives re-renders/network jitter.
+      setCurrentLocationState(draftLocation);
+      setSelectedCountryCode(countryCode);
+      setSelectedCountryName(nextCountryName);
+      setSelectedCity(city);
+      persistLocationClient(draftLocation);
+      setBotFeedback(null);
+
+      const requestId = ++locationUpdateRequestRef.current;
+      setIsChangingLocation(true);
+      setError(null);
       try {
-        const debug = await fetchZoneDebug(session.access_token, coords);
-        setZoneId(debug.zone_id);
-        setNearestDistanceKm(debug.nearest_profiles[0]?.distance_km ?? null);
-        if (typeof window !== "undefined") {
-          window.localStorage.setItem(LAST_ZONE_ID_STORAGE_KEY, debug.zone_id);
+        const withTimeout = <T,>(promise: Promise<T>, fallbackMessage: string): Promise<T> =>
+          new Promise<T>((resolve, reject) => {
+            const timeoutId = window.setTimeout(() => {
+              reject(new Error(fallbackMessage));
+            }, LOCATION_SYNC_TIMEOUT_MS);
+            promise
+              .then((result) => {
+                window.clearTimeout(timeoutId);
+                resolve(result);
+              })
+              .catch((timeoutError) => {
+                window.clearTimeout(timeoutId);
+                reject(timeoutError);
+              });
+          });
+
+        await withTimeout(
+          setCurrentLocation(
+          {
+            country_code: countryCode,
+            country_name: nextCountryName,
+            city
+          },
+          session.access_token
+          ),
+          "Location update timed out. Please try again."
+        );
+
+        // Confirm the backend cookie context first, then refresh dashboard data.
+        const [confirmedLocation, nextFeed] = await withTimeout(
+          Promise.all([
+            fetchCurrentLocation(session.access_token),
+            ENABLE_API_BOTS && selectedMode !== "vip"
+              ? fetchBotFeedback(session.access_token)
+              : Promise.resolve(null)
+          ]),
+          "Location sync took too long. Please try again."
+        );
+
+        // Ignore stale responses if a newer location change started.
+        if (requestId !== locationUpdateRequestRef.current || !isComponentMountedRef.current) {
+          return;
         }
-      } catch {
-        // Keep dashboard usable even if debug endpoint fails temporarily.
+
+        setBotFeedback(ENABLE_API_BOTS ? nextFeed : null);
+        const resolvedLocation =
+          draftLocation.country_code !== GLOBAL_LOCATION_OPTION.country_code &&
+          confirmedLocation.country_code === GLOBAL_LOCATION_OPTION.country_code
+            ? draftLocation
+            : confirmedLocation;
+
+        setCurrentLocationState(() => resolvedLocation);
+        setSelectedCountryCode(() => resolvedLocation.country_code);
+        setSelectedCountryName(() => resolvedLocation.country_name);
+        setSelectedCity(() => resolvedLocation.city);
+        persistLocationClient(resolvedLocation);
+
+        if (!keepModalOpen) {
+          setIsLocationPickerOpen(false);
+        }
+      } catch (locationError) {
+        if (requestId !== locationUpdateRequestRef.current || !isComponentMountedRef.current) {
+          return;
+        }
+        const message =
+          locationError instanceof Error
+            ? locationError.message
+            : "Could not synchronize location. Please try again.";
+        setError(message);
+      } finally {
+        if (requestId === locationUpdateRequestRef.current && isComponentMountedRef.current) {
+          setIsChangingLocation(false);
+        }
       }
     },
-    [session]
+    [selectedCountry?.country_name, selectedCountryName, selectedMode, session]
   );
 
-  const persistLocation = useCallback((coords: Coordinates) => {
-    if (typeof window !== "undefined") {
-      window.localStorage.setItem(LAST_LOCATION_STORAGE_KEY, JSON.stringify(coords));
-    }
-    setCurrentLocation(coords);
-    setLocationPermission("granted");
-    setLocationStatus("Location access enabled. Geo-Room server will auto-select.");
-  }, []);
-
-  const requestLocation = useCallback(async (): Promise<Coordinates | null> => {
-    if (typeof window === "undefined" || !navigator.geolocation) {
-      setLocationPermission("unsupported");
-      setLocationStatus("Geolocation is not available on this device/browser.");
-      return null;
-    }
-
-    setIsRequestingLocation(true);
-    return new Promise<Coordinates | null>((resolve) => {
-      navigator.geolocation.getCurrentPosition(
-        (position) => {
-          const coords = {
-            latitude: position.coords.latitude,
-            longitude: position.coords.longitude
-          };
-          persistLocation(coords);
-          resolve(coords);
-        },
-        (geoError) => {
-          if (geoError.code === geoError.PERMISSION_DENIED) {
-            setLocationPermission("denied");
-            setLocationStatus("Location permission denied. Tap ENABLE to allow access and start nearby matching.");
-          } else {
-            setLocationPermission("prompt");
-            setLocationStatus("Could not read your location yet. Tap ENABLE to try again.");
-          }
-          resolve(null);
-        },
-        { enableHighAccuracy: true, timeout: 8000, maximumAge: 10000 }
-      );
-    }).finally(() => setIsRequestingLocation(false));
-  }, [persistLocation]);
-
   useEffect(() => {
-    const storedLocation = readStoredLocation();
-    if (storedLocation) {
-      setCurrentLocation(storedLocation);
-    }
-  }, []);
-
-  useEffect(() => {
-    if (typeof window === "undefined" || !navigator.geolocation) {
-      setLocationPermission("unsupported");
-      setLocationStatus("Geolocation is not available on this device/browser.");
+    if (!isLocationPickerOpen) {
       return;
     }
-
-    if (!navigator.permissions?.query) {
-      setLocationPermission((previous) => (previous === "granted" ? previous : "unknown"));
-      return;
-    }
-
-    let isMounted = true;
-    let permissionStatusRef: PermissionStatus | null = null;
-
-    const applyPermission = (state: PermissionState) => {
-      if (!isMounted) {
+    const handlePointerDown = (event: PointerEvent) => {
+      if (!locationMenuRef.current) {
         return;
       }
-      if (state === "granted") {
-        setLocationPermission("granted");
-      } else if (state === "denied") {
-        setLocationPermission("denied");
-      } else {
-        setLocationPermission("prompt");
+      if (!locationMenuRef.current.contains(event.target as Node)) {
+        setIsLocationPickerOpen(false);
       }
     };
-
-    void navigator.permissions
-      .query({ name: "geolocation" })
-      .then((permissionStatus) => {
-        permissionStatusRef = permissionStatus;
-        applyPermission(permissionStatus.state);
-        permissionStatus.onchange = () => applyPermission(permissionStatus.state);
-      })
-      .catch(() => {
-        if (isMounted) {
-          setLocationPermission((previous) => (previous === "granted" ? previous : "unknown"));
-        }
-      });
-
-    return () => {
-      isMounted = false;
-      if (permissionStatusRef) {
-        permissionStatusRef.onchange = null;
-      }
-    };
-  }, []);
+    document.addEventListener("pointerdown", handlePointerDown);
+    return () => document.removeEventListener("pointerdown", handlePointerDown);
+  }, [isLocationPickerOpen]);
 
   useEffect(() => {
-    void requestLocation();
-  }, [requestLocation]);
-
-  useEffect(() => {
-    if (!session) {
+    if (!session || !ENABLE_API_BOTS || selectedMode === "vip") {
       return;
     }
+    const intervalId = window.setInterval(() => {
+      void loadBotFeedback();
+    }, 7000);
+    return () => window.clearInterval(intervalId);
+  }, [loadBotFeedback, selectedMode, session, currentLocation?.server_id]);
 
+  const applySelectedLocation = async () => {
     if (!currentLocation) {
-      void syncZoneDebug();
+      await syncLocationAndRefreshContext(selectedCountryCode, selectedCity, false);
       return;
     }
-
-    const syncKey = `${currentLocation.latitude.toFixed(6)},${currentLocation.longitude.toFixed(6)}`;
-    if (syncKey === lastSyncedLocationRef.current) {
+    if (currentLocation.country_code === selectedCountryCode && currentLocation.city === selectedCity) {
+      setIsLocationPickerOpen(false);
       return;
     }
-
-    lastSyncedLocationRef.current = syncKey;
-    void syncZoneDebug(currentLocation);
-  }, [currentLocation, session, syncZoneDebug]);
-
-  useEffect(() => {
-    if (typeof window === "undefined" || !navigator.geolocation || locationPermission !== "granted") {
-      return;
-    }
-
-    const watchId = navigator.geolocation.watchPosition(
-      (position) => {
-        persistLocation({
-          latitude: position.coords.latitude,
-          longitude: position.coords.longitude
-        });
-      },
-      () => {
-        // Keep previous successful coordinates and zone debug values.
-      },
-      { enableHighAccuracy: true, timeout: 8000, maximumAge: 10000 }
-    );
-
-    return () => navigator.geolocation.clearWatch(watchId);
-  }, [locationPermission, persistLocation]);
+    await syncLocationAndRefreshContext(selectedCountryCode, selectedCity, false);
+  };
 
   const startPlay = async () => {
     if (!session || playLocked) {
       return;
     }
 
+    const locationForPlay: LocationSelectionResponse = {
+      country_code: selectorCountryCode,
+      country_name: connectedCountryLabel,
+      city: connectedCityLabel,
+      latitude: currentLocation?.latitude ?? 0,
+      longitude: currentLocation?.longitude ?? 0,
+      server_id: buildServerId(selectorCountryCode, connectedCityLabel)
+    };
+
+    setCurrentLocationState(locationForPlay);
+    persistLocationClient(locationForPlay);
+
     setError(null);
     setIsStartingPlay(true);
 
     try {
-      const promptedCoords = await requestLocation();
-      const coords = promptedCoords ?? currentLocation ?? readStoredLocation();
-      if (!coords) {
-        throw new Error("Location is required to start matchmaking. Please enable location access and try again.");
-      }
-
-      window.localStorage.setItem(LAST_LOCATION_STORAGE_KEY, JSON.stringify(coords));
-      setCurrentLocation(coords);
-      await syncZoneDebug(coords);
-
-      const round = await fetchRound({ location: coords }, session.access_token);
-      setZoneId(round.zone_id);
-      window.localStorage.setItem(LAST_ZONE_ID_STORAGE_KEY, round.zone_id);
-
-      router.push("/play");
-    } catch (startError) {
-      const message = startError instanceof Error ? startError.message : "Could not start matchmaking.";
-      setError(message);
-      if (typeof window !== "undefined" && typeof window.alert === "function") {
-        window.alert(message);
-      }
-    } finally {
-      setIsStartingPlay(false);
+      await setCurrentLocation(
+        {
+          country_code: locationForPlay.country_code,
+          country_name: locationForPlay.country_name,
+          city: locationForPlay.city
+        },
+        session.access_token
+      );
+    } catch {
+      // Keep play flow moving; current selector state is still passed through URL and local storage.
     }
+
+    const params = new URLSearchParams({
+      mode: selectedMode,
+      country_code: locationForPlay.country_code,
+      country_name: locationForPlay.country_name,
+      city: locationForPlay.city
+    });
+    writeActiveGameMode(selectedMode);
+    router.push(`/play?${params.toString()}`);
   };
 
-  const showLocationModal = locationPermission !== "granted" && locationPermission !== "unsupported";
-
-  const handleProfilePhotoUpload = async (event: ChangeEvent<HTMLInputElement>) => {
-    const selectedFile = event.target.files?.[0];
-    event.target.value = "";
-
-    if (!selectedFile || !session) {
-      return;
+  const renderFeedEntry = (entry: BotFeedbackEntry) => {
+    const action = reactionLabel[entry.tip_glasa];
+    if (entry.is_for_current_user) {
+      return (
+        <>
+          <span className="font-semibold">{entry.actor_name}</span> {action} you
+        </>
+      );
     }
-
-    setError(null);
-    setUploadMessage(null);
-    setIsUploadingPhoto(true);
-
-    try {
-      const updatedUser = await uploadProfilePicture(selectedFile, session.access_token);
-      setUser(updatedUser);
-      patchSessionUser(updatedUser);
-      setUploadMessage("Profile photo uploaded. PLAY is now unlocked.");
-    } catch (uploadError) {
-      const message = uploadError instanceof Error ? uploadError.message : "Could not upload profile photo.";
-      if (message === FACE_NOT_DETECTED_MESSAGE && typeof window !== "undefined" && typeof window.alert === "function") {
-        window.alert(message);
-      }
-      setError(message);
-    } finally {
-      setIsUploadingPhoto(false);
-    }
+    return (
+      <>
+        <span className="font-semibold">{entry.actor_name}</span> {action}{" "}
+        <span className="font-semibold">{entry.target_name}</span>
+      </>
+    );
   };
 
   return (
-    <main className="mx-auto flex min-h-screen w-full max-w-md items-start px-3 py-4 md:justify-center md:py-8">
-      {showLocationModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 px-4">
-          <div className="w-full max-w-sm rounded-2xl border-2 border-yellow-300 bg-slate-950 p-6 text-center shadow-[0_0_40px_rgba(234,179,8,0.35)]">
-            <p className="text-xl font-extrabold uppercase tracking-wide text-white">Location Required</p>
-            <p className="mt-3 text-base font-semibold text-yellow-200">
-              To find people in your area, we need your location.
-            </p>
+    <main className="relative mx-auto flex min-h-screen w-full max-w-md items-start overflow-x-hidden px-3 py-4 md:justify-center md:py-8">
+      <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(70%_55%_at_0%_0%,rgba(8,107,255,0.32),transparent_70%),radial-gradient(55%_45%_at_100%_6%,rgba(20,110,255,0.22),transparent_72%),linear-gradient(160deg,#010716_0%,#020c25_50%,#010913_100%)]" />
+      <div className="pointer-events-none absolute inset-x-4 top-10 h-56 rounded-full bg-cyan-400/10 blur-3xl" />
+
+      <section
+        className="relative z-10 w-full space-y-3 rounded-[30px] border border-blue-300/15 bg-[linear-gradient(180deg,rgba(2,15,42,0.88)_0%,rgba(3,12,33,0.86)_100%)] p-3.5 shadow-[0_30px_90px_rgba(1,4,12,0.75)] backdrop-blur-xl sm:p-4"
+        style={{
+          paddingTop: "max(env(safe-area-inset-top), 0.4rem)",
+          paddingBottom: "max(env(safe-area-inset-bottom), 0.85rem)"
+        }}
+      >
+        <header className="relative min-h-[48px]">
+          <h1 className="max-w-[calc(100%-148px)] font-display text-[26px] font-bold leading-[1.02] tracking-tight text-white sm:text-[30px]">
+            Kiss Marry Kill
+          </h1>
+          <div ref={locationMenuRef} className="absolute right-0 top-0 z-50">
             <button
               type="button"
               onClick={() => {
-                void requestLocation();
+                if (!selectedCountryCode) {
+                  setSelectedCountryCode(currentLocation?.country_code ?? GLOBAL_LOCATION_OPTION.country_code);
+                  setSelectedCountryName(currentLocation?.country_name ?? GLOBAL_LOCATION_OPTION.country_name);
+                  setSelectedCity(currentLocation?.city ?? GLOBAL_LOCATION_OPTION.cities[0]);
+                }
+                setIsLocationPickerOpen((open) => !open);
               }}
-              disabled={isRequestingLocation}
-              className="mt-5 min-h-12 w-full rounded-xl border border-yellow-200 bg-yellow-300 px-4 text-lg font-black text-slate-950 transition hover:bg-yellow-200 disabled:cursor-not-allowed disabled:opacity-70"
+              className="inline-flex h-10 w-[140px] max-w-[140px] touch-manipulation items-center gap-1.5 rounded-full border border-blue-300/25 bg-[#081744]/90 px-2.5 text-xs font-semibold text-slate-100 shadow-[inset_0_0_0_1px_rgba(114,181,255,0.12)] transition-colors duration-200 active:bg-[#0a1e52] motion-reduce:transition-none"
             >
-              {isRequestingLocation ? "ENABLING..." : "ENABLE"}
+              <GlobeIcon className="h-3.5 w-3.5 shrink-0 text-cyan-200" />
+              <span className="min-w-0 flex-1 truncate text-left text-[11px] sm:text-xs">
+                {isMounted ? `${selectorCountryCode} - ${selectorCity}` : "Select Location"}
+              </span>
+              <ChevronDownIcon className="h-3.5 w-3.5 shrink-0 text-blue-200/80" />
             </button>
-            {locationPermission === "denied" && (
-              <p className="mt-3 text-xs text-slate-300">If blocked, re-allow location in browser settings, then tap ENABLE.</p>
+
+            {isLocationPickerOpen && (
+              <div className="absolute right-0 top-[calc(100%+8px)] z-50 w-[min(90vw,320px)] rounded-3xl border border-blue-300/20 bg-[#040c26]/95 p-3 shadow-[0_30px_80px_rgba(0,0,0,0.7)] backdrop-blur-sm">
+                <div className="flex items-center justify-between gap-2">
+                  <p className="text-sm font-semibold text-white">Global Location Selector</p>
+                  <button
+                    type="button"
+                    onClick={() => setIsLocationPickerOpen(false)}
+                    className="inline-flex min-h-8 touch-manipulation items-center rounded-full border border-slate-500/40 bg-slate-700/20 px-3 py-1 text-xs font-semibold text-slate-200 transition-colors duration-200 active:bg-slate-700/40"
+                  >
+                    Close
+                  </button>
+                </div>
+
+                <div className="mt-3 space-y-3">
+                  <div>
+                    <p className="mb-1 block text-[11px] font-semibold uppercase tracking-[0.18em] text-blue-200/70">Country</p>
+                    <input
+                      type="text"
+                      value={countrySearchQuery}
+                      onChange={(event) => setCountrySearchQuery(event.target.value)}
+                      placeholder="Search country..."
+                      className="mb-1.5 h-9 w-full rounded-xl border border-blue-300/20 bg-[#071535] px-3 text-xs text-slate-100 placeholder:text-slate-400/80 outline-none focus:border-cyan-300/45"
+                    />
+                    <div className="max-h-36 overflow-y-auto rounded-2xl border border-blue-300/20 bg-[#071535] p-1">
+                      {isLoadingLocationOptions && (
+                        <p className="px-3 py-2 text-xs text-slate-300">Loading countries...</p>
+                      )}
+                      {!isLoadingLocationOptions &&
+                        filteredCountries.map((country) => {
+                        const isSelected = selectedCountryCode === country.country_code;
+                        return (
+                          <button
+                            key={country.country_code}
+                            type="button"
+                            onClick={() => {
+                              setSelectedCountryCode(country.country_code);
+                              setSelectedCountryName(country.country_name);
+                              setSelectedCity(
+                                country.country_code === GLOBAL_LOCATION_OPTION.country_code
+                                  ? GLOBAL_LOCATION_OPTION.cities[0]
+                                  : (countryCitiesByCode[country.country_code]?.[0] ?? "")
+                              );
+                              setCitySearchQuery("");
+                              void loadCitiesForCountry(country);
+                            }}
+                            className={`flex min-h-10 w-full touch-manipulation items-center rounded-xl px-3 py-2 text-left text-sm transition-colors duration-150 ${
+                              isSelected ? "bg-cyan-500/25 text-cyan-100" : "text-slate-200 active:bg-slate-700/35"
+                            }`}
+                          >
+                            {country.country_name}
+                          </button>
+                        );
+                        })}
+                      {!isLoadingLocationOptions && filteredCountries.length === 0 && (
+                        <p className="px-3 py-2 text-xs text-slate-300">No countries found.</p>
+                      )}
+                    </div>
+                  </div>
+
+                  <div>
+                    <p className="mb-1 block text-[11px] font-semibold uppercase tracking-[0.18em] text-blue-200/70">City</p>
+                    <input
+                      type="text"
+                      value={citySearchQuery}
+                      onChange={(event) => setCitySearchQuery(event.target.value)}
+                      placeholder="Search city..."
+                      disabled={!selectedCountryCode}
+                      className="mb-1.5 h-9 w-full rounded-xl border border-blue-300/20 bg-[#071535] px-3 text-xs text-slate-100 placeholder:text-slate-400/80 outline-none focus:border-cyan-300/45 disabled:cursor-not-allowed disabled:opacity-60"
+                    />
+                    <div className="max-h-36 overflow-y-auto rounded-2xl border border-blue-300/20 bg-[#071535] p-1">
+                      {isLoadingCountryCities && (
+                        <p className="px-3 py-2 text-xs text-slate-300">Loading cities...</p>
+                      )}
+                      {!isLoadingCountryCities &&
+                        filteredCities.map((city) => {
+                        const isSelected = selectedCity === city;
+                        return (
+                          <button
+                            key={city}
+                            type="button"
+                            onClick={() => setSelectedCity(city)}
+                            className={`flex min-h-10 w-full touch-manipulation items-center rounded-xl px-3 py-2 text-left text-sm transition-colors duration-150 ${
+                              isSelected ? "bg-blue-500/25 text-blue-100" : "text-slate-200 active:bg-slate-700/35"
+                            }`}
+                          >
+                            {city}
+                          </button>
+                        );
+                        })}
+                      {!isLoadingCountryCities && selectedCountryCode && filteredCities.length === 0 && (
+                        <p className="px-3 py-2 text-xs text-slate-300">
+                          {selectedCountryCode === GLOBAL_LOCATION_OPTION.country_code
+                            ? "Global server ready."
+                            : "No cities found for this country."}
+                        </p>
+                      )}
+                      {!selectedCountryCode && <p className="px-3 py-2 text-xs text-slate-300">Select a country first.</p>}
+                    </div>
+                  </div>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    void applySelectedLocation();
+                  }}
+                  disabled={isChangingLocation || !selectedCountryCode || !selectedCity}
+                  className="mt-3 inline-flex min-h-11 w-full touch-manipulation items-center justify-center gap-2 rounded-2xl border border-cyan-300/40 bg-gradient-to-r from-cyan-500/30 to-blue-500/30 px-4 py-2.5 text-sm font-semibold text-cyan-100 transition-colors duration-200 active:from-cyan-500/45 active:to-blue-500/45 disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  <GlobeIcon className="h-4 w-4" />
+                  {isChangingLocation ? "Updating..." : "Connect To Location"}
+                </button>
+              </div>
             )}
           </div>
-        </div>
-      )}
-      <section
-        className="w-full space-y-4 rounded-3xl border border-slate-700/50 bg-slate-950/65 p-4 shadow-2xl shadow-black/30 backdrop-blur-xl"
-        style={{
-          paddingTop: "max(env(safe-area-inset-top), 0.25rem)",
-          paddingBottom: "max(env(safe-area-inset-bottom), 0.75rem)"
-        }}
-      >
-        <header className="flex items-center justify-between">
-          <p className="font-display text-3xl text-white">Dashboard</p>
-          <button
-            type="button"
-            onClick={logout}
-            className="min-h-11 min-w-11 rounded-xl border border-slate-500/70 bg-slate-800/70 px-3 text-sm font-semibold text-slate-100 transition hover:bg-slate-700/80"
-          >
-            Logout
-          </button>
         </header>
 
-        <div className="rounded-2xl border border-slate-700/60 bg-slate-900/55 p-4 backdrop-blur">
-          <div className="flex items-center gap-4">
-            <div className="relative h-24 w-24 overflow-hidden rounded-full border border-slate-600">
-              {hasUnlockedProfilePhoto(user?.profile_image_url) ? (
-                <Image
-                  src={user?.profile_image_url || ""}
-                  alt={user?.name || "Profile"}
-                  fill
-                  sizes="96px"
-                  className="object-cover"
-                />
-              ) : (
-                <ProfileFallback />
-              )}
+        {isMounted && (
+          <div className="flex items-center gap-2 rounded-2xl border border-blue-300/10 bg-[#061331]/75 px-3 py-2 text-xs">
+            <span className="inline-block h-2.5 w-2.5 rounded-full bg-emerald-400 shadow-[0_0_14px_rgba(52,211,153,0.95)]" />
+            <span className="text-slate-300">
+              Connected to Server:{" "}
+              <span className="font-semibold text-cyan-300">
+                {connectedCityLabel}, {connectedCountryLabel}
+              </span>
+            </span>
+          </div>
+        )}
+
+        <div className="rounded-3xl border border-blue-300/15 bg-[#041331]/80 p-3 shadow-[inset_0_1px_0_rgba(160,210,255,0.08)] backdrop-blur">
+          <div className="flex items-center gap-3">
+            <div className="relative h-20 w-20 shrink-0 sm:h-24 sm:w-24">
+              <div className="absolute -inset-1 rounded-full bg-[conic-gradient(from_120deg,rgba(34,211,238,0.65),rgba(59,130,246,0.9),rgba(14,165,233,0.6),rgba(34,211,238,0.65))] blur-[2px]" />
+              <div className="absolute -inset-0.5 rounded-full border border-cyan-300/65 shadow-[0_0_18px_rgba(34,211,238,0.55)]" />
+              <div className="relative h-full w-full overflow-hidden rounded-full border border-slate-700/70 bg-slate-900">
+                {isMounted && hasUnlockedProfilePhoto(user?.profile_image_url) ? (
+                  <Image
+                    src={user?.profile_image_url || ""}
+                    alt={user?.name || "Profile"}
+                    fill
+                    sizes="96px"
+                    className="object-cover"
+                  />
+                ) : (
+                  <ProfileFallback />
+                )}
+              </div>
             </div>
-            <div>
-              <p className="text-xl font-semibold text-white">{user?.name || "Loading..."}</p>
-              <p className="text-sm text-slate-300">{user?.email || ""}</p>
-              <p className="mt-2 text-sm text-cyan-200">Rounds Played: {user?.rounds_played ?? 0}</p>
+            <div className="min-w-0 flex-1">
+              <h2 className="truncate text-[29px] font-bold leading-none text-white sm:text-[31px]">
+                {user?.name || "Loading..."}
+              </h2>
+              <p className="mt-1 truncate text-xs text-slate-300 sm:text-sm">
+                {user?.email || ""}
+              </p>
+              <div className="mt-2 inline-flex max-w-full items-center gap-1.5 rounded-full border border-blue-300/15 bg-[#0a1f47]/75 px-2.5 py-1 text-[11px] text-slate-300 sm:text-xs">
+                <GamepadIcon className="h-3.5 w-3.5 shrink-0 text-slate-200" />
+                <span className="truncate">Rounds Played:</span>
+                <span className="font-semibold text-cyan-300">{user?.rounds_played ?? 0}</span>
+              </div>
             </div>
+            <ChevronRightIcon className="h-5 w-5 shrink-0 text-slate-400" />
           </div>
         </div>
 
-        {error && <p className="rounded-xl bg-red-500/20 px-3 py-2 text-sm text-red-200">{error}</p>}
-        {uploadMessage && <p className="rounded-xl bg-emerald-500/20 px-3 py-2 text-sm text-emerald-200">{uploadMessage}</p>}
-        {locationStatus && <p className="rounded-xl bg-slate-800/70 px-3 py-2 text-sm text-slate-200">{locationStatus}</p>}
-        {isLoading && <p className="rounded-xl bg-slate-800/70 px-3 py-2 text-sm text-slate-200">Loading profile...</p>}
+        {error && <p className="rounded-2xl border border-red-300/30 bg-red-500/15 px-3 py-2 text-sm text-red-100">{error}</p>}
 
-        <label className="block rounded-2xl border border-slate-700/60 bg-slate-900/55 p-3">
-          <span className="mb-2 block text-sm font-semibold text-slate-100">Upload Profile Photo</span>
-          <input
-            type="file"
-            accept="image/*"
-            onChange={handleProfilePhotoUpload}
-            disabled={isUploadingPhoto || !session}
-            className="block w-full text-sm text-slate-200 file:mr-3 file:rounded-lg file:border-0 file:bg-cyan-500/25 file:px-3 file:py-2 file:text-sm file:font-semibold file:text-cyan-100 hover:file:bg-cyan-500/35 disabled:opacity-60"
-          />
-          <p className="mt-2 text-xs text-slate-400">Photos are automatically resized for faster mobile loading.</p>
-          {isUploadingPhoto && <p className="mt-2 text-xs text-cyan-200">Uploading and compressing image...</p>}
-        </label>
+        <div className="rounded-3xl border border-blue-300/15 bg-[#03112d]/80 p-3 shadow-[inset_0_1px_0_rgba(180,220,255,0.06)]">
+          <div className="mb-3 flex items-center gap-2">
+            <span className="flex h-6 w-6 items-center justify-center rounded-lg bg-blue-500/20 text-cyan-300">
+              <BoltIcon className="h-3.5 w-3.5" />
+            </span>
+            <p className="text-sm font-semibold text-slate-100">Live Activity Feed</p>
+          </div>
 
-        <div className="grid grid-cols-2 gap-3">
-          {playLocked ? (
-            <MenuCard
-              title="UPLOAD PHOTO TO UNLOCK PLAY"
-              subtitle="Your photo is required before entering rounds."
-              href="/settings"
-              locked
-            />
+          {shouldShowPaywall ? (
+            <div className="relative overflow-hidden rounded-2xl border border-blue-300/30 bg-[linear-gradient(160deg,rgba(14,8,40,0.98)_0%,rgba(4,14,46,0.95)_52%,rgba(16,8,40,0.98)_100%)] p-4 shadow-[0_0_0_1px_rgba(72,142,255,0.3),0_18px_45px_rgba(0,0,0,0.55)]">
+              <div className="pointer-events-none absolute -left-6 -top-8 h-36 w-36 rounded-full bg-fuchsia-500/30 blur-3xl" />
+              <div className="pointer-events-none absolute -right-8 top-8 h-36 w-36 rounded-full bg-blue-500/35 blur-3xl" />
+              <div className="pointer-events-none absolute left-[48%] top-[28%] h-24 w-24 -translate-x-1/2 rounded-full bg-cyan-400/25 blur-2xl" />
+
+              <div className="pointer-events-none absolute left-2 top-1 z-20 h-14 w-14 drop-shadow-[0_10px_18px_rgba(251,191,36,0.4)]">
+                <PremiumLiveFeedModel
+                  className="h-full w-full"
+                  modelPath="/models/premium-rings.glb"
+                  motion="yaw"
+                  material="gold"
+                  scale={1.06}
+                  baseRotation={[0.12, 0.18, -0.08]}
+                  interlockedPair
+                  fallback={<RingsIcon className="h-full w-full opacity-95" />}
+                />
+              </div>
+              <div className="pointer-events-none absolute bottom-14 left-3 z-30 h-12 w-12 drop-shadow-[0_10px_16px_rgba(245,158,11,0.35)]">
+                <PremiumLiveFeedModel
+                  className="h-full w-full"
+                  proceduralModel="gold-lips-premium"
+                  motion="roll"
+                  material="gold"
+                  scale={0.98}
+                  baseRotation={[0.05, -0.32, -0.18]}
+                  fallback={<LipsIcon className="h-full w-full opacity-95" />}
+                />
+              </div>
+              <div className="pointer-events-none absolute right-2 top-4 z-30 h-[70px] w-[70px] drop-shadow-[0_10px_20px_rgba(150,120,255,0.45)]">
+                <PremiumLiveFeedModel
+                  className="h-full w-full"
+                  modelPath="/models/premium-skull.glb"
+                  motion="pitch"
+                  material="steel"
+                  scale={1.02}
+                  baseRotation={[-0.06, 0.27, 0]}
+                  fallback={<SkullIcon className="h-full w-full opacity-95" />}
+                />
+              </div>
+
+              <div className="relative mx-auto max-w-[240px] text-center">
+                <p className="bg-gradient-to-r from-amber-200 via-orange-200 to-amber-400 bg-clip-text text-lg font-bold text-transparent">
+                  Premium Live Feed
+                </p>
+                <p className="mt-2 text-sm leading-snug text-slate-200">
+                  Unlock your Live Feed to see exactly who{" "}
+                  <span className="font-semibold text-rose-300">Kissed</span>,{" "}
+                  <span className="font-semibold text-emerald-300">Married</span>, or{" "}
+                  <span className="font-semibold text-red-300">Killed</span> you!
+                </p>
+                {botFeedback?.paywall_message && botFeedback.paywall_message !== premiumFeedDescription && (
+                  <p className="mt-2 text-[11px] text-slate-400">{botFeedback.paywall_message}</p>
+                )}
+              </div>
+
+              <button
+                type="button"
+                onClick={() => setIsReferralModalOpen(true)}
+                className="relative z-10 mt-4 inline-flex w-full items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-cyan-400 via-sky-500 to-violet-500 px-4 py-3 text-sm font-semibold text-white shadow-[0_12px_30px_rgba(46,126,255,0.55)] transition hover:brightness-110"
+              >
+                <LockIcon className="h-4 w-4" />
+                Unlock Now
+              </button>
+            </div>
           ) : (
-            <MenuCard
-              title="PLAY"
-              subtitle={isStartingPlay ? "Computing your Geo-Room and loading nearby players..." : "Start swiping and vote this round."}
-              onClick={() => {
-                void startPlay();
-              }}
-              disabled={isStartingPlay || isLoading || !session}
-              glow
-            />
-          )}
+            <>
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="rounded-lg border border-rose-400/35 bg-rose-500/15 px-2 py-1 text-xs font-semibold text-rose-100">
+                  Kiss: {botFeedback?.kisses ?? 0}
+                </span>
+                <span className="rounded-lg border border-emerald-400/35 bg-emerald-500/15 px-2 py-1 text-xs font-semibold text-emerald-100">
+                  Marry: {botFeedback?.marries ?? 0}
+                </span>
+                <span className="rounded-lg border border-red-400/35 bg-red-500/15 px-2 py-1 text-xs font-semibold text-red-100">
+                  Kill: {botFeedback?.kills ?? 0}
+                </span>
+                <span className="ml-auto text-xs text-slate-300">Total reactions: {botFeedback?.total ?? 0}</span>
+              </div>
 
-          <MenuCard title="LEADERBOARD" subtitle="See top-rated profiles." href="/leaderboard" />
-          <MenuCard title="SETTINGS" subtitle="Update profile and preferences." href="/settings" />
+              <div className="mt-3 space-y-2">
+                {botFeedback?.recent?.length ? (
+                  botFeedback.recent.map((entry, index) => (
+                    <div
+                      key={`${entry.actor_user_id}-${entry.target_user_id}-${entry.timestamp}-${index}`}
+                      className={`rounded-xl border px-3 py-2 text-sm ${reactionStyle[entry.tip_glasa]}`}
+                    >
+                      {renderFeedEntry(entry)}
+                    </div>
+                  ))
+                ) : (
+                  <p className="rounded-xl border border-blue-300/15 bg-blue-500/5 px-3 py-2 text-xs text-slate-300">
+                    No reactions yet. Keep checking back.
+                  </p>
+                )}
+              </div>
+            </>
+          )}
         </div>
 
-        <p className="text-xs text-slate-400">
-          Your profile photo is the image other users see and rate during rounds.
-        </p>
-        <p className="text-[11px] text-slate-500">
-          Zone: {zoneId ?? "unknown"} | Distance to nearest:{" "}
-          {nearestDistanceKm !== null ? `${nearestDistanceKm.toFixed(2)} km` : "-- km"}
-        </p>
+        <div className="rounded-2xl border border-blue-300/20 bg-[#061737]/75 p-1.5 shadow-[inset_0_1px_0_rgba(170,210,255,0.08)]">
+          <div className="grid grid-cols-2 gap-1.5">
+            <button
+              type="button"
+              onClick={() => setSelectedMode("classic")}
+              aria-pressed={selectedMode === "classic"}
+              className={`inline-flex min-h-10 w-full touch-manipulation items-center justify-center rounded-xl px-3 text-xs font-semibold uppercase tracking-wide transition-colors duration-200 ${
+                selectedMode === "classic"
+                  ? "border border-cyan-300/45 bg-gradient-to-r from-cyan-500/20 to-blue-500/30 text-cyan-100 shadow-[0_0_18px_rgba(56,189,248,0.25)]"
+                  : "border border-blue-200/15 bg-[#071a40]/70 text-slate-300 active:bg-[#0a224f]"
+              }`}
+            >
+              Classic
+            </button>
+            <button
+              type="button"
+              onClick={() => setSelectedMode("vip")}
+              aria-pressed={selectedMode === "vip"}
+              className={`inline-flex min-h-10 w-full touch-manipulation items-center justify-center gap-1.5 rounded-xl px-3 text-xs font-semibold uppercase tracking-wide transition-colors duration-200 ${
+                selectedMode === "vip"
+                  ? "border border-fuchsia-300/55 bg-gradient-to-r from-fuchsia-500/25 to-pink-500/35 text-fuchsia-100 shadow-[0_0_20px_rgba(236,72,153,0.3)]"
+                  : "border border-blue-200/15 bg-[#071a40]/70 text-slate-300 active:bg-[#0a224f]"
+              }`}
+            >
+              <CrownIcon className={`h-3.5 w-3.5 ${selectedMode === "vip" ? "text-fuchsia-200" : "text-violet-200/80"}`} />
+              VIP Edition
+            </button>
+          </div>
+        </div>
+
+        {playLocked ? (
+          <Link
+            href="/settings"
+            className="relative flex h-14 w-full max-w-full touch-manipulation items-center justify-center gap-2 overflow-hidden rounded-2xl border border-amber-300/45 bg-gradient-to-r from-amber-500/30 to-orange-500/30 px-4 text-sm font-semibold uppercase tracking-wide text-amber-100 transition-colors duration-200 active:from-amber-500/40 active:to-orange-500/40 motion-reduce:transition-none"
+          >
+            <LockIcon className="h-4 w-4" />
+            Upload Photo To Unlock Play
+          </Link>
+        ) : (
+          <button
+            type="button"
+            onClick={startPlay}
+            disabled={isStartingPlay || !session}
+            className="relative h-14 w-full max-w-full touch-manipulation overflow-hidden rounded-2xl border border-blue-300/45 bg-[radial-gradient(75%_95%_at_0%_0%,rgba(76,151,255,0.42),transparent_70%),radial-gradient(95%_120%_at_100%_100%,rgba(34,211,238,0.25),transparent_72%),linear-gradient(92deg,#0f44b8_0%,#1261e2_45%,#1b8dfd_100%)] px-4 text-sm font-semibold uppercase tracking-[0.12em] text-white shadow-[0_14px_34px_rgba(24,110,255,0.45)] transition-colors duration-200 active:brightness-110 motion-reduce:transition-none disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            <span className="relative flex min-w-[168px] items-center justify-center gap-2 whitespace-nowrap">
+              <PlayIcon className="h-5 w-5" />
+              {isStartingPlay ? "Opening Round..." : "Play"}
+            </span>
+          </button>
+        )}
+
+        <div className="space-y-2.5">
+          <Link
+            href="/leaderboard"
+            className="flex h-[52px] w-full max-w-full touch-manipulation items-center rounded-2xl border border-blue-300/15 bg-[#061737]/85 px-3.5 py-3 text-sm font-semibold uppercase tracking-wide text-slate-100 transition-colors duration-200 active:bg-[#0a234a] motion-reduce:transition-none"
+          >
+            <span className="mr-3 flex h-8 w-8 items-center justify-center rounded-lg bg-violet-500/20 text-violet-300">
+              <TrophyIcon className="h-[18px] w-[18px]" />
+            </span>
+            <span className="flex-1">Leaderboard</span>
+            <ChevronRightIcon className="h-5 w-5 text-slate-400" />
+          </Link>
+          <Link
+            href="/settings"
+            className="flex h-[52px] w-full max-w-full touch-manipulation items-center rounded-2xl border border-blue-300/15 bg-[#061737]/85 px-3.5 py-3 text-sm font-semibold uppercase tracking-wide text-slate-100 transition-colors duration-200 active:bg-[#0a234a] motion-reduce:transition-none"
+          >
+            <span className="mr-3 flex h-8 w-8 items-center justify-center rounded-lg bg-emerald-500/20 text-emerald-300">
+              <SettingsIcon className="h-[18px] w-[18px]" />
+            </span>
+            <span className="flex-1">Settings</span>
+            <ChevronRightIcon className="h-5 w-5 text-slate-400" />
+          </Link>
+        </div>
+
+        <div className="flex items-center gap-3 rounded-2xl border border-blue-300/15 bg-[#041632]/80 px-3 py-3">
+          <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-cyan-300/30 bg-cyan-500/10 text-cyan-300">
+            <GlobeIcon className="h-6 w-6" />
+          </span>
+          <p className="text-xs leading-relaxed text-slate-300">
+            Live feed and matchmaking are now bound to your selected global city server.
+          </p>
+        </div>
       </section>
+      <ReferralUnlockModal
+        isOpen={isReferralModalOpen}
+        onClose={() => setIsReferralModalOpen(false)}
+        referralCount={referralCount}
+        referralTarget={referralTarget}
+        referralLink={referralLink}
+      />
     </main>
   );
 }

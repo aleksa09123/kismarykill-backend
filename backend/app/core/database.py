@@ -4,6 +4,7 @@ from collections.abc import AsyncGenerator
 import os
 from pathlib import Path
 
+from sqlalchemy import inspect
 from sqlalchemy.engine import URL, make_url
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
@@ -50,8 +51,7 @@ def _sanitize_postgres_url_for_asyncpg(url: URL) -> tuple[URL, dict[str, object]
 
 def _resolved_database_config() -> tuple[URL, dict[str, object]]:
     raw_database_url = (
-        os.environ.get("DATABASE_PRIVATE_URL")
-        or os.environ.get("DATABASE_URL")
+        os.environ.get("DATABASE_URL")
         or settings.database_url
     ).strip()
     if raw_database_url.startswith("postgres://"):
@@ -90,8 +90,26 @@ async def get_async_session() -> AsyncGenerator[AsyncSession, None]:
         yield session
 
 
+def _ensure_runtime_columns(sync_conn: object) -> None:
+    inspector = inspect(sync_conn)
+    existing_columns = {column["name"] for column in inspector.get_columns("users")}
+    if "is_premium" in existing_columns:
+        return
+
+    dialect_name = inspector.bind.dialect.name if inspector.bind is not None else ""
+    if dialect_name == "sqlite":
+        inspector.bind.exec_driver_sql(
+            "ALTER TABLE users ADD COLUMN is_premium BOOLEAN NOT NULL DEFAULT 0"
+        )
+        return
+
+    inspector.bind.exec_driver_sql(
+        "ALTER TABLE users ADD COLUMN is_premium BOOLEAN NOT NULL DEFAULT FALSE"
+    )
+
+
 async def init_db() -> None:
     async with engine.begin() as conn:
-        # Temporary hard reset to rebuild schema with all current model columns.
-        await conn.run_sync(Base.metadata.drop_all)
+        # Keep data between restarts so live activity can build up over time.
         await conn.run_sync(Base.metadata.create_all)
+        await conn.run_sync(_ensure_runtime_columns)

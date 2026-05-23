@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime
+
 from pydantic import BaseModel, Field, model_validator
 
 from app.models.enums import VoteType
@@ -32,3 +34,23 @@ class VoteRoundRequest(BaseModel):
 class VoteRoundResponse(BaseModel):
     status: str
     saved_votes: int
+
+
+class BotFeedbackEntry(BaseModel):
+    actor_user_id: int
+    actor_name: str
+    target_user_id: int
+    target_name: str
+    tip_glasa: VoteType
+    is_for_current_user: bool
+    timestamp: datetime
+
+
+class BotFeedbackResponse(BaseModel):
+    total: int
+    kisses: int
+    marries: int
+    kills: int
+    recent: list[BotFeedbackEntry]
+    is_masked: bool = False
+    paywall_message: str | None = None

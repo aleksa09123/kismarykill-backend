@@ -1,0 +1,20 @@
+# Secrets
+.env
+.env.*
+!.env.example
+
+# Local databases
+dev.db
+*.db
+
+# Python cache/build artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Uploaded media
+uploads/*
+!uploads/.gitkeep
+
+# Local tooling/cache
+.matplotlib/

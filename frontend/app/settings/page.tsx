@@ -3,10 +3,10 @@
 import Image from "next/image";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { FormEvent, useEffect, useState } from "react";
+import { ChangeEvent, FormEvent, useEffect, useRef, useState } from "react";
 
-import { fetchCurrentUser, updateCurrentUser } from "@/lib/api";
-import { hasUnlockedProfilePhoto, patchSessionUser, readSession } from "@/lib/auth-session";
+import { fetchCurrentUser, updateCurrentUser, uploadProfilePicture } from "@/lib/api";
+import { clearSession, hasUnlockedProfilePhoto, patchSessionUser, readSession } from "@/lib/auth-session";
 import type { Gender, PreferredGender } from "@/lib/types";
 
 export default function SettingsPage() {
@@ -16,10 +16,12 @@ export default function SettingsPage() {
   const [gender, setGender] = useState<Gender>("male");
   const [preferredGender, setPreferredGender] = useState<PreferredGender>("both");
   const [profileImageUrl, setProfileImageUrl] = useState("");
+  const [isUploadingPhoto, setIsUploadingPhoto] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
+  const hiddenUploadInputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
     const session = readSession();
@@ -64,12 +66,12 @@ export default function SettingsPage() {
         {
           name: name.trim(),
           gender,
-          preferred_gender: preferredGender,
-          profile_image_url: profileImageUrl.trim() || null
+          preferred_gender: preferredGender
         },
         accessToken
       );
       patchSessionUser(updatedUser);
+      setProfileImageUrl(updatedUser.profile_image_url || "");
       setSuccess("Profile saved.");
     } catch (saveError) {
       const message = saveError instanceof Error ? saveError.message : "Could not save profile.";
@@ -80,6 +82,38 @@ export default function SettingsPage() {
   };
 
   const unlocked = hasUnlockedProfilePhoto(profileImageUrl);
+
+  const triggerUploadPicker = () => {
+    hiddenUploadInputRef.current?.click();
+  };
+
+  const handleProfileFileChange = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file || !accessToken) {
+      return;
+    }
+
+    setError(null);
+    setSuccess(null);
+    setIsUploadingPhoto(true);
+    try {
+      const updatedUser = await uploadProfilePicture(file, accessToken);
+      patchSessionUser(updatedUser);
+      setProfileImageUrl(updatedUser.profile_image_url || "");
+      setSuccess("Profile photo verified and updated.");
+    } catch (uploadError) {
+      const message = uploadError instanceof Error ? uploadError.message : "Could not upload profile photo.";
+      setError(message);
+    } finally {
+      setIsUploadingPhoto(false);
+    }
+  };
+
+  const handleLogout = () => {
+    clearSession();
+    router.replace("/login");
+  };
 
   return (
     <main className="mx-auto flex min-h-screen w-full max-w-md items-start px-3 py-4 md:justify-center md:py-8">
@@ -101,7 +135,13 @@ export default function SettingsPage() {
         </header>
 
         <div className="rounded-2xl border border-slate-700/60 bg-slate-900/55 p-4">
-          <div className="relative mx-auto h-24 w-24 overflow-hidden rounded-full border border-slate-600">
+          <button
+            type="button"
+            onClick={triggerUploadPicker}
+            disabled={isLoading || isUploadingPhoto}
+            className="group relative mx-auto block h-24 w-24 overflow-hidden rounded-full border border-slate-600 transition hover:scale-[1.02] disabled:cursor-not-allowed disabled:opacity-70"
+            aria-label="Upload profile photo"
+          >
             {unlocked ? (
               <Image src={profileImageUrl} alt="Profile preview" fill sizes="96px" className="object-cover" />
             ) : (
@@ -109,10 +149,23 @@ export default function SettingsPage() {
                 Upload Photo
               </div>
             )}
-          </div>
+            <div className="absolute inset-0 flex items-end justify-center bg-black/0 pb-2 text-[11px] font-semibold text-white opacity-0 transition group-hover:bg-black/35 group-hover:opacity-100">
+              Change
+            </div>
+          </button>
+          <input
+            ref={hiddenUploadInputRef}
+            type="file"
+            accept="image/*"
+            className="hidden"
+            onChange={handleProfileFileChange}
+          />
           <p className="mt-3 text-center text-xs text-slate-300">
-            Uploading a real profile photo unlocks PLAY mode.
+            Tap your photo circle to upload and verify a real face.
           </p>
+          {isUploadingPhoto ? (
+            <p className="mt-2 text-center text-xs text-cyan-200">Verifying face and uploading photo...</p>
+          ) : null}
         </div>
 
         {isLoading && <p className="rounded-xl bg-slate-800/70 px-3 py-2 text-sm text-slate-200">Loading settings...</p>}
@@ -126,17 +179,6 @@ export default function SettingsPage() {
               value={name}
               onChange={(event) => setName(event.target.value)}
               className="min-h-11 w-full rounded-xl border border-slate-600 bg-slate-900/70 px-3 text-slate-100 outline-none ring-cyan-400 transition focus:ring"
-            />
-          </label>
-
-          <label className="block">
-            <span className="mb-1 block text-sm font-medium text-slate-200">Profile image URL</span>
-            <input
-              type="url"
-              value={profileImageUrl}
-              onChange={(event) => setProfileImageUrl(event.target.value)}
-              className="min-h-11 w-full rounded-xl border border-slate-600 bg-slate-900/70 px-3 text-slate-100 outline-none ring-cyan-400 transition focus:ring"
-              placeholder="https://i.pravatar.cc/300?u=your-id"
             />
           </label>
 
@@ -172,10 +214,18 @@ export default function SettingsPage() {
 
           <button
             type="submit"
-            disabled={isSaving || isLoading}
+            disabled={isSaving || isLoading || isUploadingPhoto}
             className="min-h-11 w-full rounded-xl border border-cyan-300/60 bg-cyan-400/15 px-4 text-sm font-semibold text-cyan-100 transition hover:bg-cyan-400/25 disabled:opacity-60"
           >
             {isSaving ? "Saving..." : "Save settings"}
+          </button>
+
+          <button
+            type="button"
+            onClick={handleLogout}
+            className="min-h-11 w-full rounded-xl border border-red-400/60 bg-red-500/20 px-4 text-sm font-semibold text-red-100 transition hover:bg-red-500/30"
+          >
+            Logout
           </button>
         </form>
       </section>

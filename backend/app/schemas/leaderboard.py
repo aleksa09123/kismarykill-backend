@@ -12,6 +12,8 @@ class LeaderboardEntry(BaseModel):
     kisses: int
     marries: int
     kills: int
+    rounds_played: int = 0
+    win_rate: float = 0.0
 
 
 class LeaderboardResponse(BaseModel):

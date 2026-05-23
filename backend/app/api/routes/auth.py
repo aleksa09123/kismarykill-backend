@@ -37,7 +37,7 @@ from app.schemas.auth import (
 router = APIRouter(tags=["auth"])
 UPLOADS_DIR = Path(__file__).resolve().parents[3] / "uploads"
 HAAR_CASCADE_PATH = Path(cv2.data.haarcascades) / "haarcascade_frontalface_default.xml"
-FACE_NOT_DETECTED_MESSAGE = "Face not detected! Please upload a clear photo of your face to unlock PLAY."
+FACE_VERIFICATION_FAILED_MESSAGE = "Image verification failed. A valid human face must be visible."
 
 
 def _image_contains_face(image: Image.Image) -> bool:
@@ -92,6 +92,7 @@ def _serialize_user(user: User, rounds_played: int = 0) -> AuthUser:
         profile_image_url=user.profile_image_url or user.slika_url,
         otp_verified=bool(user.otp_verified),
         face_verified=bool(user.face_verified),
+        is_premium=bool(user.is_premium),
         rounds_played=rounds_played,
     )
 
@@ -111,7 +112,6 @@ async def register(
         name=payload.name.strip(),
         gender=payload.gender,
         preferred_gender=payload.preferred_gender,
-        profile_image_url=payload.profile_image_url,
         password_hash=hash_password(payload.password),
     )
     email_sent = send_otp_email(pending.email, pending.verification_code)
@@ -147,13 +147,13 @@ async def verify_registration(
 
     user = User(
         ime=consumed.name,
-        slika_url=consumed.profile_image_url,
+        slika_url=None,
         pol=Gender(consumed.gender),
         email=consumed.email,
         password_hash=consumed.password_hash,
         gender=consumed.gender,
         preferred_gender=consumed.preferred_gender,
-        profile_image_url=consumed.profile_image_url,
+        profile_image_url=None,
         otp_verified=True,
         face_verified=False,
     )
@@ -213,12 +213,6 @@ async def update_me(
     if "preferred_gender" in payload.model_fields_set and payload.preferred_gender is not None:
         current_user.preferred_gender = payload.preferred_gender
 
-    if "profile_image_url" in payload.model_fields_set:
-        cleaned_url = (payload.profile_image_url or "").strip()
-        current_user.profile_image_url = cleaned_url or None
-        current_user.slika_url = cleaned_url or None
-        current_user.face_verified = False
-
     await session.commit()
     await session.refresh(current_user)
 
@@ -249,7 +243,7 @@ async def upload_profile_picture(
         image = ImageOps.exif_transpose(image).convert("RGB")
         if not _image_contains_face(image):
             image.close()
-            raise HTTPException(status_code=400, detail=FACE_NOT_DETECTED_MESSAGE)
+            raise HTTPException(status_code=400, detail=FACE_VERIFICATION_FAILED_MESSAGE)
 
         image.thumbnail((800, 800), Image.Resampling.LANCZOS)
 

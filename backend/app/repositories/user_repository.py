@@ -46,6 +46,24 @@ class UserRepository:
         user.koordinati = _point_wkt(latitude=latitude, longitude=longitude)
         await self.session.commit()
 
+    async def update_server_location(
+        self,
+        user: User,
+        *,
+        country_code: str,
+        country_name: str,
+        city: str,
+        latitude: float,
+        longitude: float,
+    ) -> None:
+        user.country_code = country_code
+        user.country_name = country_name
+        user.city = city
+        user.latitude = latitude
+        user.longitude = longitude
+        user.koordinati = _point_wkt(latitude=latitude, longitude=longitude)
+        await self.session.commit()
+
     async def get_random_users_in_radius(
         self,
         current_user_id: int,
@@ -184,3 +202,103 @@ class UserRepository:
 
         nearby_profiles.sort(key=lambda item: item.distance_km)
         return nearby_profiles
+
+    async def get_random_users_in_location(
+        self,
+        *,
+        current_user_id: int,
+        required_gender: str,
+        country_code: str,
+        city: str,
+        latitude: float,
+        longitude: float,
+        limit: int,
+        exclude_user_ids: set[int] | None = None,
+        city_only: bool = True,
+        include_bots: bool = True,
+        include_humans: bool = True,
+    ) -> list[SimpleNamespace]:
+        if not include_bots and not include_humans:
+            return []
+
+        user_gender = func.coalesce(User.gender, cast(User.pol, String))
+        excluded_ids = set(exclude_user_ids or set())
+        excluded_ids.add(current_user_id)
+
+        selected_columns = [
+            User.id,
+            User.ime.label("name"),
+            func.coalesce(User.profile_image_url, User.slika_url).label("profile_image_url"),
+            user_gender.label("gender"),
+            User.latitude.label("latitude"),
+            User.longitude.label("longitude"),
+            User.koordinati.label("koordinati"),
+            User.is_bot.label("is_bot"),
+            User.email.label("email"),
+        ]
+
+        stmt = select(*selected_columns).where(User.id.notin_(excluded_ids))
+        if required_gender in {"male", "female"}:
+            stmt = stmt.where(user_gender == required_gender)
+
+        if include_bots and not include_humans:
+            stmt = stmt.where(User.is_bot.is_(True))
+        elif include_humans and not include_bots:
+            stmt = stmt.where(User.is_bot.is_(False))
+
+        stmt = stmt.where(User.country_code == country_code)
+        if city_only:
+            stmt = stmt.where(User.city == city)
+
+        rows = (await self.session.execute(stmt)).all()
+        candidates: list[SimpleNamespace] = []
+        for row in rows:
+            candidate_latitude = float(row.latitude) if row.latitude is not None else None
+            candidate_longitude = float(row.longitude) if row.longitude is not None else None
+            if candidate_latitude is None or candidate_longitude is None:
+                parsed = _parse_point_wkt(row.koordinati)
+                if parsed is not None:
+                    candidate_latitude, candidate_longitude = parsed
+
+            if candidate_latitude is None or candidate_longitude is None:
+                continue
+
+            distance_km = haversine_distance_km(
+                latitude,
+                longitude,
+                candidate_latitude,
+                candidate_longitude,
+            )
+            candidates.append(
+                SimpleNamespace(
+                    id=row.id,
+                    name=row.name,
+                    profile_image_url=row.profile_image_url,
+                    gender=row.gender,
+                    latitude=candidate_latitude,
+                    longitude=candidate_longitude,
+                    distance_km=distance_km,
+                    is_bot=bool(row.is_bot),
+                    email=row.email,
+                )
+            )
+
+        random.shuffle(candidates)
+        return candidates[:limit]
+
+    async def count_real_users_in_location(
+        self,
+        *,
+        country_code: str,
+        city: str,
+        exclude_user_id: int | None = None,
+    ) -> int:
+        stmt = (
+            select(func.count(User.id))
+            .where(User.is_bot.is_(False))
+            .where(User.country_code == country_code)
+            .where(User.city == city)
+        )
+        if exclude_user_id is not None:
+            stmt = stmt.where(User.id != exclude_user_id)
+        return int((await self.session.scalar(stmt)) or 0)

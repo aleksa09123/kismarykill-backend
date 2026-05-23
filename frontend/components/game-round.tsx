@@ -1,106 +1,264 @@
 "use client";
 
-import Image from "next/image";
+import { motion } from "framer-motion";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { fetchRound, submitRoundVotes } from "@/lib/api";
-import type { AuthUser, RoundLocation, RoundUser, VoteType } from "@/lib/types";
+import { ENABLE_API_BOTS } from "@/lib/feature-flags";
+import {
+  VIP_MEN,
+  VIP_PORTRAIT_FALLBACK_URL,
+  VIP_WOMEN,
+  type VIPCelebrity
+} from "@/lib/vip-data";
+import type { AuthUser, RoundUser, VoteType } from "@/lib/types";
 
 const actionStyle: Record<VoteType, string> = {
-  kiss: "border-rose-300 bg-rose-50 text-rose-700",
-  marry: "border-emerald-300 bg-emerald-50 text-emerald-700",
-  kill: "border-slate-300 bg-slate-100 text-slate-700"
+  kiss: "border-rose-300/50 bg-[#241226]/90 text-rose-200",
+  marry: "border-emerald-300/50 bg-[#102620]/90 text-emerald-200",
+  kill: "border-orange-300/50 bg-[#2a1a1a]/90 text-orange-200"
 };
 
 const selectedStyle: Record<VoteType, string> = {
-  kiss: "ring-2 ring-rose-400",
-  marry: "ring-2 ring-emerald-400",
-  kill: "ring-2 ring-slate-500"
+  kiss: "ring-2 ring-rose-300 shadow-[0_0_0_1px_rgba(251,113,133,0.45)]",
+  marry: "ring-2 ring-emerald-300 shadow-[0_0_0_1px_rgba(52,211,153,0.45)]",
+  kill: "ring-2 ring-orange-300 shadow-[0_0_0_1px_rgba(251,146,60,0.45)]"
 };
 
-const DEFAULT_LOCATION: RoundLocation = {
-  latitude: 43.8563,
-  longitude: 18.4131
+const tiltByVote: Record<VoteType, { x: number; y: number; rotate: number }> = {
+  kiss: { x: -6, y: -2, rotate: -2.5 },
+  marry: { x: 6, y: -1, rotate: 2.5 },
+  kill: { x: 4, y: 4, rotate: 3.5 }
+};
+
+const cardAccentStyle: Record<VoteType, string> = {
+  kiss: "border-rose-300/65 shadow-[0_0_35px_rgba(244,114,182,0.2)]",
+  marry: "border-emerald-300/65 shadow-[0_0_35px_rgba(16,185,129,0.2)]",
+  kill: "border-orange-300/65 shadow-[0_0_35px_rgba(251,146,60,0.2)]"
+};
+
+const badgeStyle: Record<VoteType, string> = {
+  kiss: "border-rose-200/60 bg-rose-500/85 text-white",
+  marry: "border-emerald-200/60 bg-emerald-500/85 text-white",
+  kill: "border-orange-200/60 bg-orange-500/85 text-white"
 };
 
 const ROUND_SIZE = 3;
-const ZONE_RADIUS_KM = 20;
-const LAST_LOCATION_STORAGE_KEY = "kmk_last_location";
+const INTERSTITIAL_AD_ROUND_INTERVAL = 7;
+const INTERSTITIAL_AD_CLOSE_DELAY_MS = 1600;
+const VIP_ROOM_ID = "vip_global";
+const FALLBACK_PROFILE_IMAGE_URL = VIP_PORTRAIT_FALLBACK_URL;
+const ensureArray = <T,>(items: T[] | null | undefined): T[] => (Array.isArray(items) ? items : []);
+const normalizeRoundUser = (candidate: RoundUser): RoundUser => {
+  const profileImage = candidate.profile_image_url ?? candidate.imageUrl ?? null;
+  const normalizedId = String(candidate.id ?? "").trim();
+  const normalizedTargetId =
+    typeof candidate.target_id === "number" && Number.isFinite(candidate.target_id)
+      ? candidate.target_id
+      : Number.parseInt(normalizedId, 10);
+  return {
+    ...candidate,
+    id: normalizedId || `profile-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+    target_id: Number.isFinite(normalizedTargetId) ? normalizedTargetId : 0,
+    profile_image_url: profileImage,
+    imageUrl: candidate.imageUrl ?? profileImage,
+    location: candidate.location ?? null,
+    is_local_ai_bot: Boolean(candidate.is_local_ai_bot)
+  };
+};
 
-function haversineDistanceKm(a: RoundLocation, b: RoundLocation): number {
-  const toRad = (value: number) => (value * Math.PI) / 180;
-  const dLat = toRad(b.latitude - a.latitude);
-  const dLon = toRad(b.longitude - a.longitude);
-  const lat1 = toRad(a.latitude);
-  const lat2 = toRad(b.latitude);
-
-  const n =
-    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-    Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLon / 2) * Math.sin(dLon / 2);
-  const c = 2 * Math.atan2(Math.sqrt(n), Math.sqrt(1 - n));
-  return 6371 * c;
-}
-
-function readStoredLocation(): RoundLocation | null {
-  if (typeof window === "undefined") {
-    return null;
-  }
-
-  const raw = window.localStorage.getItem(LAST_LOCATION_STORAGE_KEY);
-  if (!raw) {
-    return null;
-  }
-
-  try {
-    const parsed = JSON.parse(raw) as { latitude?: unknown; longitude?: unknown };
-    if (typeof parsed.latitude !== "number" || typeof parsed.longitude !== "number") {
-      return null;
-    }
-    return {
-      latitude: parsed.latitude,
-      longitude: parsed.longitude
-    };
-  } catch {
-    return null;
-  }
-}
+export type GameMode = "classic" | "vip";
+export type VIPRoundVote = { profileId: string; action: VoteType };
 
 type GameRoundProps = {
   accessToken: string;
   currentUser: AuthUser;
+  mode: GameMode;
   onLogout: () => void;
   onBackToMenu?: () => void;
+  onVipConfirmRound?: (votes: VIPRoundVote[]) => void | Promise<void>;
 };
 
-export function GameRound({ accessToken, currentUser, onLogout, onBackToMenu }: GameRoundProps) {
+type IconProps = {
+  className?: string;
+};
+
+function HeartOutlineIcon({ className = "h-5 w-5" }: IconProps) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" className={className} aria-hidden>
+      <path
+        d="M12 20s-7-4.8-7-10a4 4 0 0 1 7-2.6A4 4 0 0 1 19 10c0 5.2-7 10-7 10Z"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
+function BackArrowIcon({ className = "h-4 w-4" }: IconProps) {
+  return (
+    <svg viewBox="0 0 20 20" fill="none" className={className} aria-hidden>
+      <path d="M9.5 4.5 4.5 10l5 5M5 10h10" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function LocationPinIcon({ className = "h-3.5 w-3.5" }: IconProps) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" className={className} aria-hidden>
+      <path
+        d="M12 21s6-5.4 6-10a6 6 0 1 0-12 0c0 4.6 6 10 6 10Z"
+        stroke="currentColor"
+        strokeWidth="1.7"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <circle cx="12" cy="11" r="2.2" fill="currentColor" />
+    </svg>
+  );
+}
+
+function RingIcon({ className = "h-3.5 w-3.5" }: IconProps) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" className={className} aria-hidden>
+      <circle cx="12" cy="12.5" r="4.2" stroke="currentColor" strokeWidth="1.8" />
+      <path d="M12 5.2V2.8M10.3 4h3.4" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function SkullIcon({ className = "h-3.5 w-3.5" }: IconProps) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" className={className} aria-hidden>
+      <path
+        d="M12 4.6c-3.4 0-6.1 2.6-6.1 5.8 0 2.2 1.2 4.1 3 5.1v1.3c0 .9.7 1.6 1.6 1.6h3c.9 0 1.6-.7 1.6-1.6v-1.3a5.7 5.7 0 0 0 3-5.1c0-3.2-2.7-5.8-6.1-5.8Z"
+        stroke="currentColor"
+        strokeWidth="1.6"
+        strokeLinejoin="round"
+      />
+      <circle cx="9.8" cy="10.9" r="1.1" fill="currentColor" />
+      <circle cx="14.2" cy="10.9" r="1.1" fill="currentColor" />
+      <path d="M10.5 14h3" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function CheckIcon({ className = "h-4.5 w-4.5" }: IconProps) {
+  return (
+    <svg viewBox="0 0 20 20" fill="none" className={className} aria-hidden>
+      <path d="m4.5 10.4 3.2 3.2 7.8-7.9" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function ControllerIcon({ className = "h-4 w-4" }: IconProps) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" className={className} aria-hidden>
+      <rect x="3.5" y="8.2" width="17" height="8.8" rx="4.2" stroke="currentColor" strokeWidth="1.6" />
+      <path d="M8 12.5h3.5M9.75 10.7v3.6" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" />
+      <circle cx="15.8" cy="11.4" r="1" fill="currentColor" />
+      <circle cx="17.6" cy="13.2" r="1" fill="currentColor" />
+    </svg>
+  );
+}
+
+const actionMeta: Record<VoteType, { ariaLabel: string; Icon: (props: IconProps) => JSX.Element }> = {
+  kiss: { ariaLabel: "Kiss", Icon: HeartOutlineIcon },
+  marry: { ariaLabel: "Marry", Icon: RingIcon },
+  kill: { ariaLabel: "Kill", Icon: SkullIcon }
+};
+
+const pickUniqueCelebrities = (pool: VIPCelebrity[] | null | undefined, count: number): VIPCelebrity[] => {
+  const candidates = [...ensureArray(pool)];
+  const picked: VIPCelebrity[] = [];
+  while (picked.length < count && candidates.length > 0) {
+    const index = Math.floor(Math.random() * candidates.length);
+    const [next] = candidates.splice(index, 1);
+    if (next) {
+      picked.push(next);
+    }
+  }
+  return picked;
+};
+
+const toVipRoundUsers = (celebrities: VIPCelebrity[] | null | undefined): RoundUser[] =>
+  ensureArray(celebrities).map((celebrity, index) => ({
+    id: celebrity.id || `vip-${index + 1}`,
+    target_id: index + 1,
+    name: celebrity.name || "",
+    profile_image_url: celebrity.imageUrl || FALLBACK_PROFILE_IMAGE_URL,
+    gender: celebrity.gender === "female" ? "female" : "male",
+    latitude: 0,
+    longitude: 0,
+    distance_km: Number((Math.random() * 9 + 0.5).toFixed(1))
+  }));
+
+export function GameRound({
+  accessToken,
+  currentUser,
+  mode,
+  onLogout,
+  onBackToMenu,
+  onVipConfirmRound
+}: GameRoundProps) {
   const [users, setUsers] = useState<RoundUser[]>([]);
-  const [location, setLocation] = useState<RoundLocation>(DEFAULT_LOCATION);
   const [zoneId, setZoneId] = useState<string | null>(null);
-  const [zoneOrigin, setZoneOrigin] = useState<RoundLocation | null>(null);
-  const [selectedByUser, setSelectedByUser] = useState<Record<number, VoteType>>({});
+  const [selectedByUser, setSelectedByUser] = useState<Record<string, VoteType>>({});
+  const [brokenImageByUser, setBrokenImageByUser] = useState<Record<string, boolean>>({});
+  const [isFallbackImageBroken, setIsFallbackImageBroken] = useState(false);
   const [isLoadingRound, setIsLoadingRound] = useState(true);
   const [isSubmittingVotes, setIsSubmittingVotes] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [info, setInfo] = useState<string | null>(null);
+  const [roundKey, setRoundKey] = useState(0);
+  const [roundsSinceLastAd, setRoundsSinceLastAd] = useState<number>(0);
+  const [isInterstitialAdVisible, setIsInterstitialAdVisible] = useState(false);
+  const [isAdCloseReady, setIsAdCloseReady] = useState(false);
+  const [pendingRoundAfterAd, setPendingRoundAfterAd] = useState(false);
+  const isVipMode = mode === "vip";
+  const vipPool = useMemo(() => (currentUser.gender === "male" ? VIP_WOMEN : VIP_MEN), [currentUser.gender]);
 
   const loadRound = useCallback(
-    async (nextLocation: RoundLocation) => {
+    async () => {
       setIsLoadingRound(true);
       setSelectedByUser({});
+      setBrokenImageByUser({});
+      setIsFallbackImageBroken(false);
       setError(null);
       setInfo(null);
-      setLocation(nextLocation);
+
+      if (isVipMode) {
+        try {
+          const nextCelebrities = pickUniqueCelebrities(vipPool, ROUND_SIZE);
+          if (nextCelebrities.length !== ROUND_SIZE) {
+            throw new Error("VIP roster is temporarily unavailable.");
+          }
+          setUsers(toVipRoundUsers(nextCelebrities));
+          setRoundKey((previous) => previous + 1);
+          setZoneId(VIP_ROOM_ID);
+        } catch (vipError) {
+          const message = vipError instanceof Error ? vipError.message : "Could not load VIP round.";
+          setError(message);
+          setUsers([]);
+        } finally {
+          setIsLoadingRound(false);
+        }
+        return;
+      }
 
       try {
-        const response = await fetchRound({ location: nextLocation }, accessToken);
-        setUsers(response.users);
+        const response = await fetchRound(accessToken);
+        const nextUsers = ensureArray(response?.users).map(normalizeRoundUser);
+        setUsers(nextUsers.slice(0, ROUND_SIZE));
+        setRoundKey((previous) => previous + 1);
         setZoneId((previousZoneId) => {
           if (previousZoneId && previousZoneId !== response.zone_id) {
-            setInfo("Moved to a new Geo-Room. Refreshing your local server feed.");
+            setInfo("Moved to a new room. Refreshing your local server feed.");
           }
           return response.zone_id;
         });
-        setZoneOrigin(nextLocation);
       } catch (roundError) {
         const message = roundError instanceof Error ? roundError.message : "Could not load the round.";
         setError(message);
@@ -109,83 +267,38 @@ export function GameRound({ accessToken, currentUser, onLogout, onBackToMenu }: 
         setIsLoadingRound(false);
       }
     },
-    [accessToken]
+    [accessToken, isVipMode, vipPool]
   );
 
   useEffect(() => {
-    const storedLocation = readStoredLocation();
-    if (storedLocation) {
-      void loadRound(storedLocation);
-    }
-
-    if (!navigator.geolocation) {
-      if (!storedLocation) {
-        void loadRound(DEFAULT_LOCATION);
-      }
-      return;
-    }
-
-    navigator.geolocation.getCurrentPosition(
-      (position) => {
-        const nextLocation = {
-          latitude: position.coords.latitude,
-          longitude: position.coords.longitude
-        };
-        if (typeof window !== "undefined") {
-          window.localStorage.setItem(LAST_LOCATION_STORAGE_KEY, JSON.stringify(nextLocation));
-        }
-        void loadRound(nextLocation);
-      },
-      () => {
-        if (!storedLocation) {
-          void loadRound(DEFAULT_LOCATION);
-        }
-      },
-      { enableHighAccuracy: true, timeout: 5000 }
-    );
+    void loadRound();
   }, [loadRound]);
 
   useEffect(() => {
-    if (!navigator.geolocation) {
+    if (!isInterstitialAdVisible) {
       return;
     }
 
-    const watchId = navigator.geolocation.watchPosition(
-      (position) => {
-        const nextLocation: RoundLocation = {
-          latitude: position.coords.latitude,
-          longitude: position.coords.longitude
-        };
-        if (typeof window !== "undefined") {
-          window.localStorage.setItem(LAST_LOCATION_STORAGE_KEY, JSON.stringify(nextLocation));
-        }
+    setIsAdCloseReady(false);
+    const timeoutId = window.setTimeout(() => {
+      setIsAdCloseReady(true);
+    }, INTERSTITIAL_AD_CLOSE_DELAY_MS);
 
-        setLocation(nextLocation);
-        if (!zoneOrigin || isLoadingRound || isSubmittingVotes) {
-          return;
-        }
-
-        const movedKm = haversineDistanceKm(zoneOrigin, nextLocation);
-        if (movedKm >= ZONE_RADIUS_KM) {
-          void loadRound(nextLocation);
-        }
-      },
-      () => {
-        // Keep last known location if geolocation updates fail mid-session.
-      },
-      { enableHighAccuracy: true, timeout: 5000, maximumAge: 10000 }
-    );
-
-    return () => navigator.geolocation.clearWatch(watchId);
-  }, [isLoadingRound, isSubmittingVotes, loadRound, zoneOrigin]);
+    return () => window.clearTimeout(timeoutId);
+  }, [isInterstitialAdVisible]);
 
   const usedActions = useMemo(() => new Set<VoteType>(Object.values(selectedByUser)), [selectedByUser]);
 
-  const assignAction = (userId: number, action: VoteType) => {
+  const assignAction = (userId: string, action: VoteType) => {
     if (isSubmittingVotes) {
       return;
     }
 
+    if (typeof window !== "undefined" && typeof navigator.vibrate === "function") {
+      navigator.vibrate(50);
+    }
+
+    setError(null);
     setSelectedByUser((previous) => {
       const next = { ...previous };
 
@@ -194,9 +307,11 @@ export function GameRound({ accessToken, currentUser, onLogout, onBackToMenu }: 
         return next;
       }
 
-      const sameActionOwner = Object.entries(next).find(([, existingAction]) => existingAction === action);
+      const sameActionOwner = Object.entries(next).find(
+        ([candidateId, existingAction]) => candidateId !== userId && existingAction === action
+      );
       if (sameActionOwner) {
-        delete next[Number(sameActionOwner[0])];
+        delete next[sameActionOwner[0]];
       }
 
       next[userId] = action;
@@ -204,140 +319,360 @@ export function GameRound({ accessToken, currentUser, onLogout, onBackToMenu }: 
     });
   };
 
-  const isRoundComplete =
-    users.length === ROUND_SIZE && users.every((candidate) => selectedByUser[candidate.id] !== undefined);
+  const safeUsers = ensureArray(users);
 
-  useEffect(() => {
+  const isRoundComplete =
+    safeUsers.length === ROUND_SIZE && safeUsers.every((candidate) => selectedByUser[candidate.id] !== undefined);
+
+  const advanceToNextRound = useCallback(async () => {
+    const nextCount = roundsSinceLastAd + 1;
+
+    if (nextCount >= INTERSTITIAL_AD_ROUND_INTERVAL) {
+      setRoundsSinceLastAd(nextCount);
+      setPendingRoundAfterAd(true);
+      setIsInterstitialAdVisible(true);
+      setInfo("Sponsored break unlocked.");
+      return;
+    }
+
+    setRoundsSinceLastAd(nextCount);
+    await loadRound();
+  }, [loadRound, roundsSinceLastAd]);
+
+  const closeInterstitialAd = useCallback(async () => {
+    if (!isAdCloseReady) {
+      return;
+    }
+
+    const shouldLoadPendingRound = pendingRoundAfterAd;
+    setIsInterstitialAdVisible(false);
+    setIsAdCloseReady(false);
+    setPendingRoundAfterAd(false);
+    setRoundsSinceLastAd(0);
+    setInfo(null);
+
+    if (shouldLoadPendingRound) {
+      await loadRound();
+    }
+  }, [isAdCloseReady, loadRound, pendingRoundAfterAd]);
+
+  const confirmVotes = async () => {
     if (!isRoundComplete || isSubmittingVotes) {
       return;
     }
 
-    const submitVotes = async () => {
-      setIsSubmittingVotes(true);
-      setError(null);
+    setIsSubmittingVotes(true);
+    setError(null);
+    try {
+      if (isVipMode) {
+        const voteCandidates = ensureArray(users);
+        const vipVotes: VIPRoundVote[] = voteCandidates.map((candidate) => ({
+          profileId: candidate.id,
+          action: selectedByUser[candidate.id] as VoteType
+        }));
 
-      try {
-        await submitRoundVotes(
-          {
-            votes: users.map((candidate) => ({
-              target_id: candidate.id,
-              tip_glasa: selectedByUser[candidate.id] as VoteType
-            }))
-          },
-          accessToken
-        );
+        if (onVipConfirmRound) {
+          await onVipConfirmRound(vipVotes);
+        }
+        setInfo("VIP round saved.");
 
-        await loadRound(location);
-      } catch (submitError) {
-        const message = submitError instanceof Error ? submitError.message : "Could not submit votes.";
-        setError(message);
-      } finally {
-        setIsSubmittingVotes(false);
+        await advanceToNextRound();
+        return;
       }
-    };
 
-    void submitVotes();
-  }, [accessToken, isRoundComplete, isSubmittingVotes, loadRound, location, selectedByUser, users]);
+      const voteCandidates = ensureArray(users);
+      if (voteCandidates.length === 0) {
+        setError("No profiles available for this round yet.");
+        return;
+      }
+
+      await submitRoundVotes(
+        {
+          votes: voteCandidates.map((candidate) => ({
+            target_id: candidate.target_id,
+            tip_glasa: selectedByUser[candidate.id] as VoteType
+          }))
+        },
+        accessToken
+      );
+      await advanceToNextRound();
+    } catch (submitError) {
+      const message = submitError instanceof Error ? submitError.message : "Could not submit votes.";
+      setError(message);
+    } finally {
+      setIsSubmittingVotes(false);
+    }
+  };
+
+  const renderCandidateCard = (candidate: RoundUser | undefined, slotIndex: number) => {
+    if (!candidate) {
+      return (
+        <div className="relative aspect-[0.76] w-full rounded-3xl border border-blue-200/15 bg-[#071128]/60 shadow-[inset_0_0_0_1px_rgba(12,24,52,0.8)]" />
+      );
+    }
+
+    const selected = selectedByUser[candidate.id];
+    const safeName = candidate.name?.trim() || "";
+    const imageUrl = candidate.profile_image_url?.trim() || candidate.imageUrl?.trim() || null;
+    const isImageBroken = Boolean(brokenImageByUser[candidate.id]);
+    const nameLength = safeName.length;
+    const nameSizeClass =
+      nameLength > 28
+        ? "text-[10px] sm:text-[11px]"
+        : nameLength > 23
+          ? "text-[11px] sm:text-[12px]"
+          : nameLength > 18
+            ? "text-[13px] sm:text-[14px]"
+            : nameLength > 14
+              ? "text-[16px] sm:text-[17px]"
+              : "text-[24px] sm:text-[26px]";
+    const resolvedImageUrl = !isImageBroken && imageUrl ? imageUrl : FALLBACK_PROFILE_IMAGE_URL;
+    const tilt = selected ? tiltByVote[selected] : { x: 0, y: 0, rotate: 0 };
+    const activeCardStyle = selected ? cardAccentStyle[selected] : "border-blue-200/25 shadow-[0_8px_30px_rgba(2,10,28,0.65)]";
+
+    return (
+      <div className="relative aspect-[0.76] w-full rounded-3xl border border-blue-200/15 bg-[#071128]/55 p-[2px] shadow-[inset_0_0_0_1px_rgba(12,24,52,0.8)]">
+        <motion.article
+          key={`round-${roundKey}-slot-${slotIndex}-candidate-${candidate.id}`}
+          initial={{ opacity: 0, scale: 0.96, y: 10 }}
+          animate={{
+            opacity: 1,
+            scale: selected ? 1.01 : 1,
+            y: tilt.y,
+            x: tilt.x,
+            rotate: tilt.rotate
+          }}
+          transition={{ type: "spring", stiffness: 190, damping: 24, mass: 0.9 }}
+          className={`absolute inset-[2px] flex h-[calc(100%-4px)] flex-col overflow-hidden rounded-[22px] border bg-[linear-gradient(180deg,rgba(6,18,46,0.96)_0%,rgba(6,15,38,0.98)_100%)] ${activeCardStyle}`}
+        >
+          <div className="relative min-h-0 flex-1 bg-[#0b1637]">
+            {!isFallbackImageBroken ? (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img
+                src={resolvedImageUrl}
+                alt={safeName || "Profile"}
+                loading="lazy"
+                decoding="async"
+                className="w-full h-full object-cover"
+                onError={() => {
+                  if (resolvedImageUrl === FALLBACK_PROFILE_IMAGE_URL) {
+                    setIsFallbackImageBroken(true);
+                    return;
+                  }
+                  setBrokenImageByUser((previous) => (previous[candidate.id] ? previous : { ...previous, [candidate.id]: true }));
+                }}
+              />
+            ) : (
+              <div className="h-full w-full bg-[radial-gradient(60%_70%_at_50%_30%,rgba(35,138,255,0.28),transparent_70%),linear-gradient(160deg,#0d1f45_0%,#09162e_65%,#060f22_100%)]">
+                <div className="absolute inset-0 shadow-[inset_0_0_0_1px_rgba(123,180,255,0.2)]" />
+              </div>
+            )}
+
+            {selected && (
+              <span
+                className={`absolute left-2.5 top-2.5 rounded-full border px-2 py-1 text-[10px] font-bold uppercase tracking-wide shadow ${badgeStyle[selected]}`}
+              >
+                {selected}
+              </span>
+            )}
+
+            <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-[#030a18]/95 via-[#050e24]/70 to-transparent px-3 pb-3 pt-12">
+              <p className={`w-full whitespace-nowrap font-bold leading-tight tracking-tight text-white ${nameSizeClass}`}>
+                {safeName || "Unknown"}
+              </p>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-3 gap-2 border-t border-blue-200/15 bg-[#070f25]/80 p-2 sm:p-2.5">
+            {(Object.keys(actionStyle) as VoteType[]).map((action) => {
+              const disabled = isSubmittingVotes;
+              const { ariaLabel, Icon } = actionMeta[action];
+              return (
+                <button
+                  key={action}
+                  type="button"
+                  aria-label={ariaLabel}
+                  disabled={disabled}
+                  onClick={() => assignAction(candidate.id, action)}
+                  className={`inline-flex min-h-10 min-w-0 items-center justify-center rounded-xl border px-1.5 transition-colors duration-200 ${
+                    actionStyle[action]
+                  } ${selected === action ? selectedStyle[action] : ""} ${
+                    disabled ? "opacity-60" : "active:brightness-110"
+                  }`}
+                >
+                  <span className="inline-flex h-5 w-5 items-center justify-center">
+                    <Icon className="h-4 w-4 drop-shadow-[0_0_10px_currentColor]" />
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+        </motion.article>
+      </div>
+    );
+  };
+
+  const renderSkeletonCard = (slotIndex: number) => (
+    <div
+      key={`skeleton-card-${slotIndex}`}
+      className="relative aspect-[0.76] w-full rounded-3xl border border-blue-200/15 bg-[#071128]/60 p-[2px] shadow-[inset_0_0_0_1px_rgba(12,24,52,0.8)]"
+    >
+      <div className="absolute inset-[2px] overflow-hidden rounded-[22px] border border-blue-200/20 bg-[#081530]/85">
+        <div className="skeleton-shimmer h-[72%] w-full" />
+        <div className="space-y-2 px-3 py-3">
+          <div className="skeleton-shimmer h-4 w-3/4 rounded-md" />
+          <div className="grid grid-cols-3 gap-2 pt-1">
+            <div className="skeleton-shimmer h-9 rounded-xl" />
+            <div className="skeleton-shimmer h-9 rounded-xl" />
+            <div className="skeleton-shimmer h-9 rounded-xl" />
+          </div>
+        </div>
+      </div>
+    </div>
+  );
 
   return (
-    <section className="w-full space-y-4 rounded-3xl border border-slate-200 bg-white/95 p-4 shadow-xl shadow-slate-900/10 backdrop-blur">
-      <header className="rounded-2xl bg-slate-900 px-4 py-3 text-white">
-        <div className="flex items-center justify-between gap-3">
-          <div>
-            <p className="font-display text-2xl leading-tight">Kiss Marry Kill</p>
-            <p className="text-xs text-slate-300">Signed in as {currentUser.name}</p>
+    <>
+      <section className="w-full space-y-4 rounded-[30px] border border-blue-300/15 bg-[linear-gradient(180deg,rgba(2,14,38,0.9)_0%,rgba(3,12,33,0.92)_100%)] p-3.5 shadow-[0_30px_90px_rgba(1,4,12,0.78)] backdrop-blur-xl sm:p-4">
+      <header className="rounded-3xl border border-blue-200/15 bg-[#050f2a]/80 px-3 py-3 shadow-[inset_0_0_0_1px_rgba(15,30,62,0.85)]">
+        <div className="flex items-start justify-between gap-2.5">
+          <div className="min-w-0">
+            <div className="flex items-center gap-2.5">
+              <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border border-fuchsia-300/25 bg-gradient-to-br from-fuchsia-500/20 via-violet-500/15 to-sky-500/15 text-fuchsia-200 shadow-[0_0_18px_rgba(217,70,239,0.25)]">
+                <HeartOutlineIcon className="h-5 w-5" />
+              </span>
+              <div className="min-w-0">
+                <p className="truncate text-[35px] font-bold leading-tight text-white sm:text-[37px]">KMK</p>
+                <p className="truncate text-xs text-slate-400">Signed in as {currentUser.name}</p>
+              </div>
+            </div>
           </div>
-          <div className="flex items-center gap-2">
-            {onBackToMenu && (
-              <button
-                type="button"
-                onClick={onBackToMenu}
-                className="min-h-11 min-w-11 rounded-xl border border-cyan-400/60 px-3 text-sm font-semibold text-cyan-100 transition hover:bg-cyan-900/40"
-              >
-                Back to Menu
-              </button>
-            )}
+          {onBackToMenu && (
             <button
               type="button"
-              onClick={onLogout}
-              className="min-h-11 min-w-11 rounded-xl border border-slate-500 px-3 text-sm font-semibold text-slate-100 transition hover:bg-slate-800"
+              onClick={onBackToMenu}
+              className="inline-flex min-h-11 shrink-0 items-center justify-center gap-1.5 rounded-full border border-violet-300/30 bg-[#1a1740]/85 px-3.5 text-xs font-semibold text-violet-100 transition-colors duration-200 active:bg-[#251d56] sm:text-sm"
             >
-              Logout
+              <BackArrowIcon className="h-4 w-4" />
+              Back to Menu
             </button>
-          </div>
+          )}
         </div>
       </header>
 
-      {error && <p className="rounded-xl bg-red-50 px-3 py-2 text-sm text-red-700">{error}</p>}
-      {info && <p className="rounded-xl bg-cyan-50 px-3 py-2 text-sm text-cyan-700">{info}</p>}
+      {error && <p className="rounded-2xl border border-red-300/30 bg-red-500/15 px-3 py-2 text-sm text-red-100">{error}</p>}
+      {info && <p className="rounded-2xl border border-cyan-300/30 bg-cyan-500/15 px-3 py-2 text-sm text-cyan-100">{info}</p>}
 
       {(isLoadingRound || isSubmittingVotes) && (
-        <p className="rounded-xl bg-slate-100 px-3 py-2 text-sm text-slate-700">
-          {isSubmittingVotes ? "Submitting votes and loading next round..." : "Loading nearby users..."}
+        <p className="rounded-2xl border border-blue-300/20 bg-blue-500/10 px-3 py-2 text-sm text-blue-100">
+          {isSubmittingVotes ? "Submitting votes and loading next round..." : "Loading profiles..."}
         </p>
       )}
 
-      {!isLoadingRound && users.length !== ROUND_SIZE && (
-        <p className="rounded-xl bg-amber-50 px-3 py-2 text-sm text-amber-700">
-          Not enough users matched your filters in this area right now. Try again from another location.
+      {!isLoadingRound && safeUsers.length !== ROUND_SIZE && (
+        <p className="rounded-2xl border border-amber-300/35 bg-amber-500/15 px-3 py-2 text-sm text-amber-100">
+          {ENABLE_API_BOTS
+            ? "Not enough profiles right now. More bots/users will appear as activity grows."
+            : "No local profiles are available yet. API bots are currently paused, so only real players are shown."}
         </p>
       )}
 
       <div className="space-y-3">
-        {users.map((candidate) => {
-          const selected = selectedByUser[candidate.id];
-          const imageUrl = candidate.profile_image_url?.trim() || null;
-
-          return (
-            <article key={candidate.id} className="overflow-hidden rounded-2xl border border-slate-200 bg-white">
-              <div className="relative aspect-[4/5] w-full bg-slate-200">
-                {imageUrl ? (
-                  <Image
-                    src={imageUrl}
-                    alt={candidate.name}
-                    fill
-                    sizes="(max-width: 768px) 100vw, 420px"
-                    className="object-cover"
-                  />
-                ) : (
-                  <div className="flex h-full w-full items-center justify-center bg-slate-300 text-3xl font-bold text-slate-600">
-                    {candidate.name.slice(0, 1).toUpperCase()}
-                  </div>
-                )}
-                <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/80 to-transparent px-4 pb-4 pt-10 text-white">
-                  <p className="font-display text-2xl">{candidate.name}</p>
-                  <p className="text-sm text-slate-200">
-                    {candidate.distance_km.toFixed(1)} km away | {candidate.gender}
-                  </p>
-                </div>
-              </div>
-
-              <div className="grid grid-cols-3 gap-2 p-3">
-                {(Object.keys(actionStyle) as VoteType[]).map((action) => (
-                  <button
-                    key={action}
-                    type="button"
-                    disabled={isSubmittingVotes}
-                    onClick={() => assignAction(candidate.id, action)}
-                    className={`min-h-11 min-w-11 rounded-xl border px-2 text-sm font-semibold capitalize transition ${
-                      actionStyle[action]
-                    } ${selected === action ? selectedStyle[action] : ""}`}
-                  >
-                    {action}
-                  </button>
-                ))}
-              </div>
-            </article>
-          );
-        })}
+        {isLoadingRound ? (
+          <div className="mx-auto w-full max-w-[520px]">
+            <div className="grid grid-cols-4 gap-2.5 sm:gap-3">
+              <div className="col-span-2">{renderSkeletonCard(0)}</div>
+              <div className="col-span-2">{renderSkeletonCard(1)}</div>
+              <div className="col-span-2 col-start-2">{renderSkeletonCard(2)}</div>
+            </div>
+          </div>
+        ) : (
+          <motion.div
+            key={`round-layout-${roundKey}`}
+            initial={{ opacity: 0, scale: 0.97 }}
+            animate={{ opacity: 1, scale: 1 }}
+            transition={{ duration: 0.28, ease: "easeOut" }}
+            className="mx-auto w-full max-w-[520px]"
+          >
+            <div className="grid grid-cols-4 gap-2.5 sm:gap-3">
+              <div className="col-span-2">{renderCandidateCard(safeUsers[0], 0)}</div>
+              <div className="col-span-2">{renderCandidateCard(safeUsers[1], 1)}</div>
+              <div className="col-span-2 col-start-2">{renderCandidateCard(safeUsers[2], 2)}</div>
+            </div>
+          </motion.div>
+        )}
       </div>
 
-      <footer className="rounded-xl bg-slate-100 px-3 py-2 text-xs text-slate-700">
-        Chosen actions: {Array.from(usedActions).join(", ") || "none"} ({usedActions.size}/3) | Zone:{" "}
-        {zoneId ?? "loading"} | Location:{" "}
-        {location.latitude.toFixed(3)}, {location.longitude.toFixed(3)}
-      </footer>
-    </section>
+        <button
+          type="button"
+          onClick={() => {
+            void confirmVotes();
+          }}
+          disabled={!isRoundComplete || isSubmittingVotes || safeUsers.length !== ROUND_SIZE}
+          className="inline-flex min-h-12 w-full items-center justify-center gap-2 rounded-full border border-blue-300/45 bg-gradient-to-r from-[#2830a3] via-[#2c48c8] to-[#235cca] px-4 py-2 text-sm font-semibold text-blue-50 shadow-[0_14px_30px_rgba(30,84,200,0.45)] transition-colors duration-200 active:brightness-110 disabled:cursor-not-allowed disabled:opacity-60"
+        >
+          <CheckIcon className="h-4.5 w-4.5" />
+          {isSubmittingVotes ? "Submitting Round..." : "Confirm Round"}
+        </button>
+
+        <footer className="flex items-center justify-between gap-2 rounded-2xl border border-blue-200/15 bg-[#060f27]/85 px-3 py-2.5 text-xs text-slate-300">
+          <div className="flex min-w-0 items-center gap-2">
+            <ControllerIcon className="h-4 w-4 shrink-0 text-violet-200" />
+            <p className="truncate">
+              Chosen actions: {Array.from(usedActions).join(", ") || "none"} ({usedActions.size}/3)
+            </p>
+            <span className="h-4 w-px bg-blue-200/30" />
+            <p className="truncate">Room: {zoneId ?? "loading"}</p>
+          </div>
+          <span className="shrink-0 rounded-full border border-blue-300/35 bg-blue-500/20 px-2.5 py-1 text-[11px] font-semibold text-blue-100">
+            {usedActions.size}/3
+          </span>
+        </footer>
+      </section>
+
+      {isInterstitialAdVisible && (
+        <div className="fixed inset-0 z-[140] flex items-center justify-center bg-[radial-gradient(80%_80%_at_50%_20%,rgba(37,99,235,0.22),transparent_65%),linear-gradient(180deg,rgba(2,6,23,0.96)_0%,rgba(3,8,28,0.98)_100%)] px-4 py-6">
+          <motion.section
+            initial={{ opacity: 0, scale: 0.94, y: 12 }}
+            animate={{ opacity: 1, scale: 1, y: 0 }}
+            transition={{ type: "spring", stiffness: 220, damping: 24 }}
+            className="w-full max-w-md rounded-3xl border border-blue-300/25 bg-[#060f2d]/95 p-4 shadow-[0_30px_90px_rgba(0,0,0,0.65)]"
+          >
+            <p className="text-center text-xs uppercase tracking-[0.2em] text-cyan-200/80">Sponsored Break</p>
+            <h3 className="mt-1 text-center text-xl font-bold text-white">Interstitial Ad</h3>
+            <p className="mt-1 text-center text-sm text-slate-300">Thanks for playing. Your next round will resume after this ad.</p>
+
+            <div className="mt-4 rounded-2xl border border-blue-300/20 bg-[linear-gradient(160deg,rgba(15,23,42,0.92)_0%,rgba(17,24,39,0.92)_100%)] p-3">
+              <div className="flex min-h-[220px] items-center justify-center rounded-xl border border-dashed border-blue-300/35 bg-[#0b1535]/90 text-center">
+                <div className="space-y-2">
+                  <p className="text-xs uppercase tracking-[0.2em] text-cyan-200/70">Google Ad Placeholder</p>
+                  <p className="text-sm font-semibold text-white">Premium Partner Placement</p>
+                  <p className="text-xs text-slate-400">Official creative will render here via AdSense.</p>
+                </div>
+              </div>
+            </div>
+
+            <div className="mt-4 flex justify-center">
+              {isAdCloseReady ? (
+                <button
+                  type="button"
+                  onClick={() => {
+                    void closeInterstitialAd();
+                  }}
+                  className="inline-flex min-h-11 items-center justify-center rounded-xl border border-rose-300/50 bg-rose-500/20 px-4 text-sm font-semibold text-rose-100 transition hover:bg-rose-500/30"
+                >
+                  Close Ad (X)
+                </button>
+              ) : (
+                <p className="rounded-xl border border-blue-300/25 bg-blue-500/10 px-3 py-2 text-xs text-blue-100">
+                  Close button unlocks in a moment...
+                </p>
+              )}
+            </div>
+          </motion.section>
+        </div>
+      )}
+    </>
   );
 }
 

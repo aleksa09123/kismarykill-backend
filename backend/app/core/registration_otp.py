@@ -20,7 +20,6 @@ class PendingRegistration:
     name: str
     gender: str
     preferred_gender: str
-    profile_image_url: str | None
     password_hash: str
     verification_code: str
     expires_at: datetime
@@ -48,7 +47,6 @@ def create_pending_registration(
     name: str,
     gender: str,
     preferred_gender: str,
-    profile_image_url: str | None,
     password_hash: str,
 ) -> PendingRegistration:
     normalized_email = _normalize_email(email)
@@ -60,7 +58,6 @@ def create_pending_registration(
         name=name,
         gender=gender,
         preferred_gender=preferred_gender,
-        profile_image_url=profile_image_url,
         password_hash=password_hash,
         verification_code=verification_code,
         expires_at=expires_at,

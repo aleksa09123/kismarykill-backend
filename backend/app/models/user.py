@@ -44,10 +44,16 @@ class User(Base):
         server_default="both",
     )
     profile_image_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    age: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    country_code: Mapped[str | None] = mapped_column(String(2), nullable=True, index=True)
+    country_name: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    city: Mapped[str | None] = mapped_column(String(120), nullable=True, index=True)
     latitude: Mapped[float | None] = mapped_column(Float, nullable=True, index=True)
     longitude: Mapped[float | None] = mapped_column(Float, nullable=True, index=True)
     otp_verified: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=false())
     face_verified: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=false())
+    is_premium: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=false())
+    is_bot: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=false())
     swipe_blocked_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     koordinati: Mapped[str | None] = mapped_column(String(64), nullable=True)
     datum_registracije: Mapped[datetime] = mapped_column(

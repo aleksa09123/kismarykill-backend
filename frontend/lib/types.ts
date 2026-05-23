@@ -8,17 +8,17 @@ export type RoundLocation = {
 };
 
 export type RoundUser = {
-  id: number;
+  id: string;
+  target_id: number;
   name: string;
   profile_image_url?: string | null;
+  imageUrl?: string | null;
+  location?: string | null;
   gender: Gender;
   latitude: number;
   longitude: number;
   distance_km: number;
-};
-
-export type GetRoundRequest = {
-  location: RoundLocation;
+  is_local_ai_bot?: boolean;
 };
 
 export type GetRoundResponse = {
@@ -52,15 +52,54 @@ export type VoteRoundResponse = {
   saved_votes: number;
 };
 
+export type BotFeedbackEntry = {
+  actor_user_id: number;
+  actor_name: string;
+  target_user_id: number;
+  target_name: string;
+  tip_glasa: VoteType;
+  is_for_current_user: boolean;
+  timestamp: string;
+};
+
+export type BotFeedbackResponse = {
+  total: number;
+  kisses: number;
+  marries: number;
+  kills: number;
+  recent: BotFeedbackEntry[];
+  is_masked?: boolean;
+  paywall_message?: string | null;
+};
+
+export type LocationOptionCountry = {
+  country_code: string;
+  country_name: string;
+  cities: string[];
+};
+
+export type LocationSelectionResponse = {
+  country_code: string;
+  country_name: string;
+  city: string;
+  latitude: number;
+  longitude: number;
+  server_id: string;
+};
+
 export type AuthUser = {
   id: number;
   email: string;
   name: string;
+  username?: string | null;
   gender: Gender;
   preferred_gender: PreferredGender;
   profile_image_url?: string | null;
   otp_verified?: boolean;
   face_verified?: boolean;
+  is_premium?: boolean;
+  referralCount?: number;
+  referral_count?: number;
   rounds_played: number;
 };
 
@@ -82,7 +121,6 @@ export type RegisterRequest = {
   name: string;
   gender: Gender;
   preferred_gender: PreferredGender;
-  profile_image_url?: string;
 };
 
 export type LoginRequest = {
@@ -99,7 +137,6 @@ export type UpdateProfileRequest = {
   name?: string;
   gender?: Gender;
   preferred_gender?: PreferredGender;
-  profile_image_url?: string | null;
 };
 
 export type LeaderboardEntry = {
@@ -111,6 +148,8 @@ export type LeaderboardEntry = {
   kisses: number;
   marries: number;
   kills: number;
+  rounds_played: number;
+  win_rate: number;
 };
 
 export type LeaderboardResponse = {

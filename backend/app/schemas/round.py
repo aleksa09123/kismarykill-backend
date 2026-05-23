@@ -13,13 +13,17 @@ class GetRoundRequest(BaseModel):
 
 
 class RoundCandidate(BaseModel):
-    id: int
+    id: str
+    target_id: int
     name: str
     profile_image_url: str | None = None
+    imageUrl: str | None = None
+    location: str | None = None
     gender: str
     latitude: float
     longitude: float
     distance_km: float
+    is_local_ai_bot: bool = False
 
 
 class GetRoundResponse(BaseModel):

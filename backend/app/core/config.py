@@ -14,7 +14,7 @@ class Settings(BaseSettings):
     app_name: str = "Kiss Marry Kill API"
     database_url: str = Field(
         default="postgresql+asyncpg://postgres:postgres@127.0.0.1:5432/kismarykill",
-        validation_alias=AliasChoices("DATABASE_PRIVATE_URL", "DATABASE_URL", "database_url"),
+        validation_alias=AliasChoices("DATABASE_URL", "database_url"),
     )
     zone_radius_km: int = 20
     round_size: int = 3
@@ -22,11 +22,8 @@ class Settings(BaseSettings):
         default=None,
         validation_alias=AliasChoices("RESEND_API_KEY"),
     )
-    cors_origins: str = (
-        "http://192.168.100.91:3000,"
-        "http://192.168.100.91"
-    )
-    cors_allow_origin_regex: str = r"https?://(127\.0\.0\.1|192\.168\.100\.91)(:\d+)?"
+    cors_origins: str = "http://localhost:3000,http://127.0.0.1:3000"
+    cors_allow_origin_regex: str = r"https?://(127\.0\.0\.1|localhost)(:\d+)?"
     jwt_secret_key: str = Field(
         default="change-this-in-production",
         validation_alias=AliasChoices("JWT_SECRET_KEY", "SECRET_KEY"),

@@ -3,31 +3,49 @@ import type { AuthResponse, AuthUser } from "@/lib/types";
 export const AUTH_STORAGE_KEY = "kmk_auth_session";
 
 const PLACEHOLDER_TOKENS = ["placeholder", "default-avatar", "/default-avatar", "avatar-default"];
+let sessionMemoryCache: AuthResponse | null | undefined;
 
-export function readSession(): AuthResponse | null {
-  if (typeof window === "undefined") {
-    return null;
-  }
-
-  const raw = window.localStorage.getItem(AUTH_STORAGE_KEY);
-  if (!raw) {
-    return null;
-  }
-
+function parseStoredSession(raw: string): AuthResponse | null {
   try {
     const parsed = JSON.parse(raw) as AuthResponse;
     if (!parsed.access_token || !parsed.user) {
-      window.localStorage.removeItem(AUTH_STORAGE_KEY);
       return null;
     }
     return parsed;
   } catch {
-    window.localStorage.removeItem(AUTH_STORAGE_KEY);
     return null;
   }
 }
 
+export function readSession(): AuthResponse | null {
+  if (sessionMemoryCache !== undefined) {
+    return sessionMemoryCache;
+  }
+
+  if (typeof window === "undefined") {
+    sessionMemoryCache = null;
+    return sessionMemoryCache;
+  }
+
+  const raw = window.localStorage.getItem(AUTH_STORAGE_KEY);
+  if (!raw) {
+    sessionMemoryCache = null;
+    return null;
+  }
+
+  const parsed = parseStoredSession(raw);
+  if (!parsed) {
+    window.localStorage.removeItem(AUTH_STORAGE_KEY);
+    sessionMemoryCache = null;
+    return null;
+  }
+
+  sessionMemoryCache = parsed;
+  return parsed;
+}
+
 export function writeSession(session: AuthResponse): void {
+  sessionMemoryCache = session;
   if (typeof window === "undefined") {
     return;
   }
@@ -35,6 +53,7 @@ export function writeSession(session: AuthResponse): void {
 }
 
 export function clearSession(): void {
+  sessionMemoryCache = null;
   if (typeof window === "undefined") {
     return;
   }
@@ -53,6 +72,11 @@ export function patchSessionUser(nextUser: AuthUser): AuthResponse | null {
   };
   writeSession(updated);
   return updated;
+}
+
+export function refreshSessionFromStorage(): AuthResponse | null {
+  sessionMemoryCache = undefined;
+  return readSession();
 }
 
 export function hasUnlockedProfilePhoto(url: string | null | undefined): boolean {
