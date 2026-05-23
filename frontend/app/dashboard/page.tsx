@@ -10,7 +10,12 @@ import { ReferralUnlockModal } from "@/components/referral-unlock-modal";
 import { fetchBotFeedback, fetchCurrentLocation, setCurrentLocation } from "@/lib/api";
 import { AUTH_STORAGE_KEY, hasUnlockedProfilePhoto, readSession, refreshSessionFromStorage } from "@/lib/auth-session";
 import { ENABLE_API_BOTS } from "@/lib/feature-flags";
-import { ACTIVE_GAME_MODE_STORAGE_KEY, readActiveGameMode, writeActiveGameMode } from "@/lib/game-mode";
+import {
+  ACTIVE_GAME_MODE_STORAGE_KEY,
+  ACTIVE_GAME_MODE_UPDATED_EVENT,
+  readActiveGameMode,
+  writeActiveGameMode
+} from "@/lib/game-mode";
 import type {
   AuthResponse,
   AuthUser,
@@ -363,7 +368,7 @@ export default function DashboardPage() {
   const [isReferralModalOpen, setIsReferralModalOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [botFeedback, setBotFeedback] = useState<BotFeedbackResponse | null>(null);
-  const [selectedMode, setSelectedMode] = useState<PlayMode>("classic");
+  const [selectedMode, setSelectedMode] = useState<PlayMode>(() => readActiveGameMode());
   const [currentLocation, setCurrentLocationState] = useState<LocationSelectionResponse | null>(() => readInitialLocationClient());
 
   const [locationOptions, setLocationOptions] = useState<LocationOptionCountry[]>(() =>
@@ -423,6 +428,9 @@ export default function DashboardPage() {
 
       setSelectedMode(readActiveGameMode());
     };
+    const syncModeFromStorage = () => {
+      setSelectedMode(readActiveGameMode());
+    };
 
     const onStorage = (event: StorageEvent) => {
       if (
@@ -435,13 +443,21 @@ export default function DashboardPage() {
       }
     };
 
+    syncFromStorage();
     window.addEventListener("storage", onStorage);
     window.addEventListener("focus", syncFromStorage);
+    window.addEventListener(ACTIVE_GAME_MODE_UPDATED_EVENT, syncModeFromStorage as EventListener);
     return () => {
       window.removeEventListener("storage", onStorage);
       window.removeEventListener("focus", syncFromStorage);
+      window.removeEventListener(ACTIVE_GAME_MODE_UPDATED_EVENT, syncModeFromStorage as EventListener);
     };
   }, [isMounted]);
+
+  const handleModeSelection = useCallback((mode: PlayMode) => {
+    setSelectedMode(mode);
+    writeActiveGameMode(mode);
+  }, []);
 
   useEffect(() => {
     if (!isMounted) {
@@ -1268,7 +1284,7 @@ export default function DashboardPage() {
           <div className="grid grid-cols-2 gap-1.5">
             <button
               type="button"
-              onClick={() => setSelectedMode("classic")}
+              onClick={() => handleModeSelection("classic")}
               aria-pressed={selectedMode === "classic"}
               className={`inline-flex min-h-10 w-full touch-manipulation items-center justify-center rounded-xl px-3 text-xs font-semibold uppercase tracking-wide transition-colors duration-200 ${
                 selectedMode === "classic"
@@ -1280,7 +1296,7 @@ export default function DashboardPage() {
             </button>
             <button
               type="button"
-              onClick={() => setSelectedMode("vip")}
+              onClick={() => handleModeSelection("vip")}
               aria-pressed={selectedMode === "vip"}
               className={`inline-flex min-h-10 w-full touch-manipulation items-center justify-center gap-1.5 rounded-xl px-3 text-xs font-semibold uppercase tracking-wide transition-colors duration-200 ${
                 selectedMode === "vip"
@@ -1292,6 +1308,9 @@ export default function DashboardPage() {
               VIP Edition
             </button>
           </div>
+          <p className="mt-1.5 px-1 text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-300">
+            Active Mode: {selectedMode === "vip" ? "VIP Edition" : "Classic"}
+          </p>
         </div>
 
         {playLocked ? (

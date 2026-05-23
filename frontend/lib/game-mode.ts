@@ -1,6 +1,7 @@
 export type GameMode = "classic" | "vip";
 
 export const ACTIVE_GAME_MODE_STORAGE_KEY = "kmk_active_mode";
+export const ACTIVE_GAME_MODE_UPDATED_EVENT = "kmk:active-game-mode-updated";
 
 export function normalizeGameMode(value: string | null | undefined): GameMode {
   return value === "vip" ? "vip" : "classic";
@@ -18,5 +19,5 @@ export function writeActiveGameMode(mode: GameMode): void {
     return;
   }
   window.localStorage.setItem(ACTIVE_GAME_MODE_STORAGE_KEY, mode);
+  window.dispatchEvent(new CustomEvent<GameMode>(ACTIVE_GAME_MODE_UPDATED_EVENT, { detail: mode }));
 }
-

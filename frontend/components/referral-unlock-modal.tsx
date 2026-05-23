@@ -1,7 +1,7 @@
 "use client";
 
 import { AnimatePresence, motion } from "framer-motion";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 type ReferralUnlockModalProps = {
   isOpen: boolean;
@@ -19,33 +19,53 @@ function copyWithExecCommand(text: string): boolean {
   const textArea = document.createElement("textarea");
   textArea.value = text;
   textArea.setAttribute("readonly", "true");
+  textArea.setAttribute("aria-hidden", "true");
   textArea.style.position = "fixed";
-  textArea.style.top = "-9999px";
+  textArea.style.top = "0";
   textArea.style.left = "-9999px";
   textArea.style.opacity = "0";
+  textArea.style.pointerEvents = "none";
   document.body.appendChild(textArea);
 
+  const activeElement = document.activeElement as HTMLElement | null;
   const selection = document.getSelection();
-  const previousRange = selection && selection.rangeCount > 0 ? selection.getRangeAt(0) : null;
-
-  textArea.focus();
-  textArea.select();
-  textArea.setSelectionRange(0, textArea.value.length);
+  const previousRanges: Range[] = [];
+  if (selection && selection.rangeCount > 0) {
+    for (let index = 0; index < selection.rangeCount; index += 1) {
+      previousRanges.push(selection.getRangeAt(index).cloneRange());
+    }
+  }
 
   let copied = false;
   try {
+    textArea.focus();
+    textArea.select();
+    textArea.setSelectionRange(0, textArea.value.length);
+
+    const isIOS =
+      typeof navigator !== "undefined" && /ipad|iphone|ipod/i.test(navigator.userAgent);
+    if (isIOS && selection) {
+      const range = document.createRange();
+      range.selectNodeContents(textArea);
+      selection.removeAllRanges();
+      selection.addRange(range);
+      textArea.setSelectionRange(0, textArea.value.length);
+    }
+
     copied = document.execCommand("copy");
   } catch {
     copied = false;
-  }
-
-  if (textArea.parentNode) {
-    textArea.parentNode.removeChild(textArea);
-  }
-
-  if (selection && previousRange) {
-    selection.removeAllRanges();
-    selection.addRange(previousRange);
+  } finally {
+    if (selection) {
+      selection.removeAllRanges();
+      previousRanges.forEach((range) => selection.addRange(range));
+    }
+    if (activeElement && typeof activeElement.focus === "function") {
+      activeElement.focus();
+    }
+    if (textArea.parentNode) {
+      textArea.parentNode.removeChild(textArea);
+    }
   }
 
   return copied;
@@ -74,6 +94,8 @@ async function copyTextSafely(text: string): Promise<boolean> {
   return copyWithExecCommand(text);
 }
 
+type CopyStatus = "idle" | "copied" | "error";
+
 export function ReferralUnlockModal({
   isOpen,
   onClose,
@@ -81,7 +103,8 @@ export function ReferralUnlockModal({
   referralTarget = 5,
   referralLink
 }: ReferralUnlockModalProps) {
-  const [isCopied, setIsCopied] = useState(false);
+  const [copyStatus, setCopyStatus] = useState<CopyStatus>("idle");
+  const linkInputRef = useRef<HTMLInputElement>(null);
   const safeCount = Number.isFinite(referralCount) ? Math.max(0, referralCount) : 0;
   const progressPercent = useMemo(
     () => Math.min(100, (safeCount / referralTarget) * 100),
@@ -104,16 +127,25 @@ export function ReferralUnlockModal({
   }, [isOpen, onClose]);
 
   useEffect(() => {
-    if (!isCopied) {
+    if (copyStatus !== "copied") {
       return;
     }
-    const timeoutId = window.setTimeout(() => setIsCopied(false), 1600);
+    const timeoutId = window.setTimeout(() => setCopyStatus("idle"), 1800);
     return () => window.clearTimeout(timeoutId);
-  }, [isCopied]);
+  }, [copyStatus]);
 
   const handleCopyLink = async () => {
     const copied = await copyTextSafely(referralLink);
-    setIsCopied(copied);
+    if (copied) {
+      setCopyStatus("copied");
+      return;
+    }
+
+    if (linkInputRef.current) {
+      linkInputRef.current.focus();
+      linkInputRef.current.select();
+    }
+    setCopyStatus("error");
   };
 
   return (
@@ -180,6 +212,7 @@ export function ReferralUnlockModal({
               </p>
               <div className="flex items-center gap-2">
                 <input
+                  ref={linkInputRef}
                   type="text"
                   readOnly
                   value={referralLink}
@@ -193,9 +226,18 @@ export function ReferralUnlockModal({
                   disabled={!referralLink}
                   className="inline-flex h-10 shrink-0 items-center justify-center rounded-xl border border-cyan-300/40 bg-gradient-to-r from-cyan-500/25 to-blue-500/35 px-3 text-xs font-semibold text-cyan-100 transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-60"
                 >
-                  {isCopied ? "Copied! ✅" : "Copy Invite Link"}
+                  {copyStatus === "copied"
+                    ? "Copied!"
+                    : copyStatus === "error"
+                      ? "Tap and hold to copy"
+                      : "Copy Invite Link"}
                 </button>
               </div>
+              {copyStatus === "error" ? (
+                <p className="mt-2 text-[11px] text-amber-200">
+                  Your browser blocked automatic copy. Long-press the link field and copy manually.
+                </p>
+              ) : null}
             </div>
           </motion.section>
         </motion.div>
@@ -203,4 +245,3 @@ export function ReferralUnlockModal({
     </AnimatePresence>
   );
 }
-

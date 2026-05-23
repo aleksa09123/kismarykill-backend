@@ -15,8 +15,6 @@ const display = Playfair_Display({
   variable: "--font-display"
 });
 
-const googlePublisherId = process.env.NEXT_PUBLIC_GOOGLE_PUBLISHER_ID;
-
 export const metadata: Metadata = {
   title: "Kiss Marry Kill",
   description: "Mobile-first social matching game"
@@ -37,15 +35,13 @@ export default function RootLayout({
     <html lang="en">
       <body className={`${sans.variable} ${display.variable} antialiased`}>
         {children}
-        {googlePublisherId ? (
-          <Script
-            id="google-adsense-loader"
-            strategy="afterInteractive"
-            async
-            src={`https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=${googlePublisherId}`}
-            crossOrigin="anonymous"
-          />
-        ) : null}
+        <Script
+          id="google-adsense-loader"
+          async
+          src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=ca-pub-1680175309169171"
+          crossOrigin="anonymous"
+          strategy="afterInteractive"
+        />
       </body>
     </html>
   );

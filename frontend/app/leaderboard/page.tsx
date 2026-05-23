@@ -8,10 +8,10 @@ import { useEffect, useState } from "react";
 import { fetchCurrentLocation, fetchLeaderboard } from "@/lib/api";
 import { readSession } from "@/lib/auth-session";
 import { ENABLE_API_BOTS } from "@/lib/feature-flags";
-import { readActiveGameMode, type GameMode } from "@/lib/game-mode";
+import { ACTIVE_GAME_MODE_UPDATED_EVENT, readActiveGameMode, type GameMode } from "@/lib/game-mode";
 import { VIP_CELEBRITIES } from "@/lib/vip-data";
 import { getVIPStatForProfile, VIP_STATS_UPDATED_EVENT } from "@/lib/vip-stats";
-import type { AuthUser, LeaderboardEntry, LocationSelectionResponse } from "@/lib/types";
+import type { LeaderboardEntry, LocationSelectionResponse } from "@/lib/types";
 
 function locationLeaderboardTitle(location: LocationSelectionResponse | null, mode: GameMode): string {
   if (mode === "vip") {
@@ -58,43 +58,6 @@ function buildVipLeaderboardEntries(): LeaderboardEntry[] {
     .map((entry, index) => ({ ...entry, rank: index + 1 }));
 }
 
-function injectCurrentUserToClassicLeaderboard(entries: LeaderboardEntry[], user: AuthUser): LeaderboardEntry[] {
-  const roundsPlayed = Math.max(1, user.rounds_played ?? 0);
-  const baselineScore = Math.max(1450, roundsPlayed * 24);
-  const kisses = Math.max(0, Math.floor(roundsPlayed * 0.44));
-  const marries = Math.max(0, Math.floor(roundsPlayed * 0.39));
-  const kills = Math.max(0, Math.floor(roundsPlayed * 0.17));
-  const denominator = Math.max(1, kisses + marries + kills);
-  const winRate = Number((((kisses + marries) / denominator) * 100).toFixed(1));
-
-  const currentUserEntry: LeaderboardEntry = {
-    rank: 0,
-    user_id: user.id,
-    name: user.name,
-    profile_image_url: user.profile_image_url ?? null,
-    score: baselineScore,
-    kisses,
-    marries,
-    kills,
-    rounds_played: roundsPlayed,
-    win_rate: winRate
-  };
-
-  const merged = [currentUserEntry, ...entries.filter((entry) => entry.user_id !== user.id)];
-  return merged
-    .sort((left, right) => {
-      if (right.score !== left.score) {
-        return right.score - left.score;
-      }
-      if (right.rounds_played !== left.rounds_played) {
-        return right.rounds_played - left.rounds_played;
-      }
-      return right.win_rate - left.win_rate;
-    })
-    .slice(0, 10)
-    .map((entry, index) => ({ ...entry, rank: index + 1 }));
-}
-
 export default function LeaderboardPage() {
   const router = useRouter();
   const [entries, setEntries] = useState<LeaderboardEntry[]>([]);
@@ -113,6 +76,26 @@ export default function LeaderboardPage() {
       return;
     }
 
+    const syncModeFromStorage = () => {
+      setActiveMode(readActiveGameMode());
+    };
+
+    syncModeFromStorage();
+    window.addEventListener("focus", syncModeFromStorage);
+    window.addEventListener("storage", syncModeFromStorage);
+    window.addEventListener(ACTIVE_GAME_MODE_UPDATED_EVENT, syncModeFromStorage as EventListener);
+    return () => {
+      window.removeEventListener("focus", syncModeFromStorage);
+      window.removeEventListener("storage", syncModeFromStorage);
+      window.removeEventListener(ACTIVE_GAME_MODE_UPDATED_EVENT, syncModeFromStorage as EventListener);
+    };
+  }, [hasMounted]);
+
+  useEffect(() => {
+    if (!hasMounted) {
+      return;
+    }
+
     const session = readSession();
     if (!session) {
       router.replace("/login");
@@ -120,11 +103,20 @@ export default function LeaderboardPage() {
     }
 
     const mode = readActiveGameMode();
-    setActiveMode(mode);
+    if (mode !== activeMode) {
+      setActiveMode(mode);
+    }
+
+    let cancelled = false;
+    setIsLoading(true);
+    setError(null);
 
     const loadLeaderboard = async () => {
       try {
         if (mode === "vip") {
+          if (cancelled) {
+            return;
+          }
           setEntries(buildVipLeaderboardEntries());
           setLocationContext(null);
           return;
@@ -135,19 +127,29 @@ export default function LeaderboardPage() {
           fetchCurrentLocation(session.access_token)
         ]);
 
-        const mergedEntries = injectCurrentUserToClassicLeaderboard(response.users, session.user);
-        setEntries(mergedEntries);
+        if (cancelled) {
+          return;
+        }
+        setEntries(response.users);
         setLocationContext(currentLocation);
       } catch (loadError) {
+        if (cancelled) {
+          return;
+        }
         const message = loadError instanceof Error ? loadError.message : "Could not load leaderboard.";
         setError(message);
       } finally {
-        setIsLoading(false);
+        if (!cancelled) {
+          setIsLoading(false);
+        }
       }
     };
 
     void loadLeaderboard();
-  }, [hasMounted, router]);
+    return () => {
+      cancelled = true;
+    };
+  }, [activeMode, hasMounted, router]);
 
   useEffect(() => {
     if (!hasMounted || activeMode !== "vip") {

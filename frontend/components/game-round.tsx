@@ -48,6 +48,8 @@ const INTERSTITIAL_AD_ROUND_INTERVAL = 7;
 const INTERSTITIAL_AD_CLOSE_DELAY_MS = 1600;
 const VIP_ROOM_ID = "vip_global";
 const FALLBACK_PROFILE_IMAGE_URL = VIP_PORTRAIT_FALLBACK_URL;
+const ADSENSE_CLIENT_ID = "ca-pub-1680175309169171";
+const ADSENSE_INTERSTITIAL_SLOT_ID = process.env.NEXT_PUBLIC_ADSENSE_INTERSTITIAL_SLOT_ID?.trim() ?? "";
 const ensureArray = <T,>(items: T[] | null | undefined): T[] => (Array.isArray(items) ? items : []);
 const normalizeRoundUser = (candidate: RoundUser): RoundUser => {
   const profileImage = candidate.profile_image_url ?? candidate.imageUrl ?? null;
@@ -217,7 +219,10 @@ export function GameRound({
   const [isInterstitialAdVisible, setIsInterstitialAdVisible] = useState(false);
   const [isAdCloseReady, setIsAdCloseReady] = useState(false);
   const [pendingRoundAfterAd, setPendingRoundAfterAd] = useState(false);
+  const [interstitialAdInstance, setInterstitialAdInstance] = useState(0);
+  const [adRenderError, setAdRenderError] = useState<string | null>(null);
   const isVipMode = mode === "vip";
+  const isAdSlotConfigured = ADSENSE_INTERSTITIAL_SLOT_ID.length > 0;
   const vipPool = useMemo(() => (currentUser.gender === "male" ? VIP_WOMEN : VIP_MEN), [currentUser.gender]);
 
   const loadRound = useCallback(
@@ -287,6 +292,25 @@ export function GameRound({
     return () => window.clearTimeout(timeoutId);
   }, [isInterstitialAdVisible]);
 
+  useEffect(() => {
+    if (!isInterstitialAdVisible || !isAdSlotConfigured) {
+      return;
+    }
+
+    setAdRenderError(null);
+    const timeoutId = window.setTimeout(() => {
+      try {
+        const adQueueHost = window as Window & { adsbygoogle?: Array<Record<string, unknown>> };
+        adQueueHost.adsbygoogle = adQueueHost.adsbygoogle ?? [];
+        adQueueHost.adsbygoogle.push({});
+      } catch {
+        setAdRenderError("Ad failed to load. Close and continue to the next round.");
+      }
+    }, 0);
+
+    return () => window.clearTimeout(timeoutId);
+  }, [interstitialAdInstance, isAdSlotConfigured, isInterstitialAdVisible]);
+
   const usedActions = useMemo(() => new Set<VoteType>(Object.values(selectedByUser)), [selectedByUser]);
 
   const assignAction = (userId: string, action: VoteType) => {
@@ -331,6 +355,7 @@ export function GameRound({
       setRoundsSinceLastAd(nextCount);
       setPendingRoundAfterAd(true);
       setIsInterstitialAdVisible(true);
+      setInterstitialAdInstance((previous) => previous + 1);
       setInfo("Sponsored break unlocked.");
       return;
     }
@@ -643,14 +668,32 @@ export function GameRound({
             <p className="mt-1 text-center text-sm text-slate-300">Thanks for playing. Your next round will resume after this ad.</p>
 
             <div className="mt-4 rounded-2xl border border-blue-300/20 bg-[linear-gradient(160deg,rgba(15,23,42,0.92)_0%,rgba(17,24,39,0.92)_100%)] p-3">
-              <div className="flex min-h-[220px] items-center justify-center rounded-xl border border-dashed border-blue-300/35 bg-[#0b1535]/90 text-center">
-                <div className="space-y-2">
-                  <p className="text-xs uppercase tracking-[0.2em] text-cyan-200/70">Google Ad Placeholder</p>
-                  <p className="text-sm font-semibold text-white">Premium Partner Placement</p>
-                  <p className="text-xs text-slate-400">Official creative will render here via AdSense.</p>
-                </div>
+              <div className="min-h-[220px] rounded-xl border border-blue-300/25 bg-[#0b1535]/90 p-2">
+                {isAdSlotConfigured ? (
+                  <ins
+                    key={`interstitial-adsense-${interstitialAdInstance}`}
+                    className="adsbygoogle block h-full w-full"
+                    style={{ display: "block", minHeight: "220px" }}
+                    data-ad-client={ADSENSE_CLIENT_ID}
+                    data-ad-slot={ADSENSE_INTERSTITIAL_SLOT_ID}
+                    data-ad-format="auto"
+                    data-full-width-responsive="true"
+                  />
+                ) : (
+                  <div className="flex min-h-[220px] items-center justify-center rounded-lg border border-dashed border-amber-300/40 bg-amber-500/10 text-center">
+                    <p className="max-w-[260px] text-xs text-amber-100">
+                      Configure NEXT_PUBLIC_ADSENSE_INTERSTITIAL_SLOT_ID to render interstitial AdSense creatives here.
+                    </p>
+                  </div>
+                )}
               </div>
             </div>
+
+            {adRenderError ? (
+              <p className="mt-3 rounded-xl border border-amber-300/40 bg-amber-500/15 px-3 py-2 text-xs text-amber-100">
+                {adRenderError}
+              </p>
+            ) : null}
 
             <div className="mt-4 flex justify-center">
               {isAdCloseReady ? (

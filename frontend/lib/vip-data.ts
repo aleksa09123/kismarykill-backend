@@ -1010,12 +1010,6 @@ export const VIP_WOMEN: VIPCelebrity[] = [
     imageUrl: 'https://upload.wikimedia.org/wikipedia/commons/5/59/Bella_Poarch_-_Pink_Aura_Tour.jpg'
   },
   {
-    id: 'vip-woman-66',
-    name: 'Pokimane',
-    gender: 'female',
-    imageUrl: 'https://upload.wikimedia.org/wikipedia/commons/thumb/e/e4/Pokimane_sig.svg/1280px-Pokimane_sig.svg.png'
-  },
-  {
     id: 'vip-woman-67',
     name: 'Valkyrae',
     gender: 'female',
@@ -1116,12 +1110,6 @@ export const VIP_WOMEN: VIPCelebrity[] = [
     name: 'Lana Del Rey',
     gender: 'female',
     imageUrl: 'https://upload.wikimedia.org/wikipedia/commons/thumb/d/d0/LanaDRPrimavera310524_%2832_of_147%29_%2853765476960%29_%28cropped%29.jpg/1280px-LanaDRPrimavera310524_%2832_of_147%29_%2853765476960%29_%28cropped%29.jpg'
-  },
-  {
-    id: 'vip-woman-84',
-    name: 'Halsey',
-    gender: 'female',
-    imageUrl: 'https://upload.wikimedia.org/wikipedia/commons/d/d0/WI%3B_Marathon_County_Map%3B_Town_of_Halsey.png'
   },
   {
     id: 'vip-woman-85',
