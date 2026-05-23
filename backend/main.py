@@ -41,15 +41,16 @@ app = FastAPI(
 uploads_dir = os.path.join(BACKEND_DIR, "uploads")
 os.makedirs(uploads_dir, exist_ok=True)
 
-origins = settings.cors_origins_list
-
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,
-    allow_origin_regex=settings.cors_allow_origin_regex,
+    # Temporary production debug mode:
+    # keep CORS fully open until frontend/backend integration is verified.
+    allow_origins=["*"],
     allow_credentials=True,
+    # '*' includes OPTIONS and all standard HTTP methods for preflight/actual requests.
     allow_methods=["*"],
     allow_headers=["*"],
+    allow_private_network=True,
 )
 
 app.mount("/uploads", StaticFiles(directory=uploads_dir), name="uploads")
