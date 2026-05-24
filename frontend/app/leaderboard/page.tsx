@@ -18,12 +18,12 @@ function locationLeaderboardTitle(location: LocationSelectionResponse | null, mo
     return "Top VIP Profiles - Global";
   }
   if (!location) {
-    return "Top Profiles";
+    return "Top Profiles - Global";
   }
   if (location.country_code === "GL") {
     return "Top Profiles - Global";
   }
-  return `Top Profiles - ${location.city}, ${location.country_name}`;
+  return `Top Profiles - ${location.country_name}`;
 }
 
 function buildVipLeaderboardEntries(): LeaderboardEntry[] {
@@ -122,10 +122,8 @@ export default function LeaderboardPage() {
           return;
         }
 
-        const [response, currentLocation] = await Promise.all([
-          fetchLeaderboard(session.access_token),
-          fetchCurrentLocation(session.access_token)
-        ]);
+        const currentLocation = await fetchCurrentLocation(session.access_token);
+        const response = await fetchLeaderboard(session.access_token, currentLocation.country_code);
 
         if (cancelled) {
           return;

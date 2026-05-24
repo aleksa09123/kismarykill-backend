@@ -12,6 +12,18 @@ BACKEND_DIR = Path(__file__).resolve().parents[2]
 
 class Settings(BaseSettings):
     app_name: str = "Kiss Marry Kill API"
+    supabase_url: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("SUPABASE_URL"),
+    )
+    supabase_key: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "SUPABASE_KEY",
+            "SUPABASE_ANON_KEY",
+            "SUPABASE_PUBLISHABLE_KEY",
+        ),
+    )
     database_url: str = Field(
         default="postgresql+asyncpg://postgres:postgres@127.0.0.1:5432/kismarykill",
         validation_alias=AliasChoices("DATABASE_URL", "database_url"),

@@ -42,7 +42,6 @@ def _apply_paywall_mask(feedback: BotFeedbackResponse) -> BotFeedbackResponse:
 async def _simulate_local_ai_feed_background(
     user_id: int,
     country_code: str,
-    city: str,
     local_bot_ids: list[int],
 ) -> None:
     async with AsyncSessionLocal() as background_session:
@@ -50,7 +49,6 @@ async def _simulate_local_ai_feed_background(
         await background_service.simulate_local_ai_live_feed_event(
             user_id=user_id,
             country_code=country_code,
-            city=city,
             local_bot_ids=local_bot_ids,
         )
 
@@ -72,7 +70,6 @@ async def submit_vote(
         if ENABLE_API_BOTS:
             await bot_service.ensure_bots_seeded_for_location(
                 country_code=location_context.country_code,
-                city=location_context.city,
                 country_name=location_context.country_name,
                 latitude=location_context.latitude,
                 longitude=location_context.longitude,
@@ -81,13 +78,11 @@ async def submit_vote(
             await bot_service.simulate_paced_activity_for_user(
                 current_user,
                 country_code=location_context.country_code,
-                city=location_context.city,
             )
     else:
         round_target_ids = [vote.target_id for vote in payload.votes]
         contains_local_bots = await bot_service.round_contains_local_ai_bots(
             country_code=location_context.country_code,
-            city=location_context.city,
             user_ids=round_target_ids,
         )
         if ENABLE_API_BOTS and contains_local_bots:
@@ -95,7 +90,6 @@ async def submit_vote(
                 _simulate_local_ai_feed_background,
                 current_user.id,
                 location_context.country_code,
-                location_context.city,
                 round_target_ids,
             )
 
@@ -115,7 +109,6 @@ async def get_bot_feedback(
         if ENABLE_API_BOTS:
             await bot_service.ensure_bots_seeded_for_location(
                 country_code=location_context.country_code,
-                city=location_context.city,
                 country_name=location_context.country_name,
                 latitude=location_context.latitude,
                 longitude=location_context.longitude,
@@ -124,18 +117,15 @@ async def get_bot_feedback(
             await bot_service.simulate_paced_activity_for_user(
                 current_user,
                 country_code=location_context.country_code,
-                city=location_context.city,
             )
     else:
         include_bots = await bot_service.should_use_local_ai_bots(
             country_code=location_context.country_code,
-            city=location_context.city,
             exclude_user_id=current_user.id,
         )
         if ENABLE_API_BOTS and include_bots:
             await bot_service.ensure_local_ai_bots_for_location(
                 country_code=location_context.country_code,
-                city=location_context.city,
                 country_name=location_context.country_name,
                 latitude=location_context.latitude,
                 longitude=location_context.longitude,
@@ -145,7 +135,6 @@ async def get_bot_feedback(
     feedback = await bot_service.get_live_feedback_for_user(
         current_user.id,
         country_code=location_context.country_code,
-        city=location_context.city,
         include_bots=include_bots,
     )
     if current_user.is_premium:

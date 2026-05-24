@@ -2,6 +2,7 @@ import type {
   BotFeedbackResponse,
   AuthResponse,
   AuthUser,
+  GetRoundBatchResponse,
   GetRoundResponse,
   LeaderboardResponse,
   LoginRequest,
@@ -14,6 +15,7 @@ import type {
   VoteRoundRequest,
   VoteRoundResponse
 } from "@/lib/types";
+import { readSession, recoverSessionSilently } from "@/lib/auth-session";
 
 const rawApiBaseUrl = process.env.NEXT_PUBLIC_API_URL?.trim() ?? "";
 export const API_BASE_URL = rawApiBaseUrl.replace(/\/+$/, "");
@@ -24,6 +26,16 @@ const NO_CACHE_HEADERS = {
   Pragma: "no-cache",
   Expires: "0"
 };
+
+export class ApiRequestError extends Error {
+  status: number | null;
+
+  constructor(message: string, status: number | null = null) {
+    super(message);
+    this.name = "ApiRequestError";
+    this.status = status;
+  }
+}
 
 function withCacheBuster(path: string): string {
   const separator = path.includes("?") ? "&" : "?";
@@ -65,33 +77,45 @@ function alertConnectingToApi(): void {
 
 async function request<T>(path: string, init: RequestInit, accessToken?: string): Promise<T> {
   if (!API_BASE_URL) {
-    throw new Error("Missing NEXT_PUBLIC_API_URL. Add it in frontend/.env.local and Vercel Environment Variables.");
+    throw new ApiRequestError(
+      "Missing NEXT_PUBLIC_API_URL. Add it in frontend/.env.local and Vercel Environment Variables."
+    );
   }
 
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
-  let response: Response;
-
-  try {
-    response = await fetch(`${API_BASE_URL}${path}`, {
-      ...init,
-      headers: {
-        "Content-Type": "application/json",
-        ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
-        ...(init.headers ?? {})
-      },
-      credentials: "include",
-      cache: "no-store",
-      signal: controller.signal
-    });
-  } catch (error) {
-    if (error instanceof DOMException && error.name === "AbortError") {
-      throw new Error("Request timed out. Please check phone Wi-Fi and backend server availability.");
+  const fetchOnce = async (token: string | undefined): Promise<Response> => {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+    try {
+      return await fetch(`${API_BASE_URL}${path}`, {
+        ...init,
+        headers: {
+          "Content-Type": "application/json",
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+          ...(init.headers ?? {})
+        },
+        credentials: "include",
+        cache: "no-store",
+        signal: controller.signal
+      });
+    } catch (error) {
+      if (error instanceof DOMException && error.name === "AbortError") {
+        throw new ApiRequestError("Request timed out. Please check phone Wi-Fi and backend server availability.");
+      }
+      throw new ApiRequestError(
+        `Could not reach API at ${API_BASE_URL}. Check NEXT_PUBLIC_API_URL and backend CORS settings.`
+      );
+    } finally {
+      clearTimeout(timeoutId);
     }
+  };
 
-    throw new Error(`Could not reach API at ${API_BASE_URL}. Check NEXT_PUBLIC_API_URL and backend CORS settings.`);
-  } finally {
-    clearTimeout(timeoutId);
+  let tokenForRequest = accessToken;
+  let response = await fetchOnce(tokenForRequest);
+  if (response.status === 401 && tokenForRequest) {
+    await recoverSessionSilently();
+    const refreshedSession = readSession();
+    tokenForRequest = refreshedSession?.access_token?.trim() || tokenForRequest;
+    response = await fetchOnce(tokenForRequest);
   }
 
   if (!response.ok) {
@@ -99,11 +123,11 @@ async function request<T>(path: string, init: RequestInit, accessToken?: string)
     if (contentType.includes("application/json")) {
       const errorBody = (await response.json()) as { detail?: unknown };
       const backendMessage = errorMessageFromUnknown(errorBody.detail);
-      throw new Error(backendMessage ?? `Request failed with status ${response.status}`);
+      throw new ApiRequestError(backendMessage ?? `Request failed with status ${response.status}`, response.status);
     }
 
     const errorPayload = await response.text();
-    throw new Error(errorPayload || `Request failed with status ${response.status}`);
+    throw new ApiRequestError(errorPayload || `Request failed with status ${response.status}`, response.status);
   }
 
   return (await response.json()) as T;
@@ -173,6 +197,17 @@ export async function fetchRound(accessToken: string): Promise<GetRoundResponse>
   );
 }
 
+export async function fetchRoundBatch(accessToken: string, count: number): Promise<GetRoundBatchResponse> {
+  const normalizedCount = Number.isFinite(count) ? Math.min(20, Math.max(1, Math.trunc(count))) : 18;
+  return request<GetRoundBatchResponse>(
+    `/profiles/batch?count=${normalizedCount}`,
+    {
+      method: "GET"
+    },
+    accessToken
+  );
+}
+
 export async function submitRoundVotes(payload: VoteRoundRequest, accessToken: string): Promise<VoteRoundResponse> {
   return request<VoteRoundResponse>(
     "/vote",
@@ -205,9 +240,11 @@ export async function updateCurrentUser(payload: UpdateProfileRequest, accessTok
   );
 }
 
-export async function fetchLeaderboard(accessToken: string) {
+export async function fetchLeaderboard(accessToken: string, countryCode?: string | null) {
+  const normalizedCountry = (countryCode ?? "").trim().toUpperCase();
+  const countryQuery = normalizedCountry && normalizedCountry !== "GL" ? `?country_code=${normalizedCountry}` : "";
   return request<LeaderboardResponse>(
-    "/leaderboard",
+    `/leaderboard${countryQuery}`,
     {
       method: "GET"
     },
@@ -246,7 +283,7 @@ export async function fetchCurrentLocation(accessToken: string): Promise<Locatio
 }
 
 export async function setCurrentLocation(
-  payload: { country_code: string; country_name?: string; city: string },
+  payload: { country_code: string; country_name?: string },
   accessToken: string
 ): Promise<LocationSelectionResponse> {
   return request<LocationSelectionResponse>(
@@ -261,49 +298,66 @@ export async function setCurrentLocation(
 
 export async function uploadProfilePicture(file: File, accessToken: string): Promise<AuthUser> {
   if (!API_BASE_URL) {
-    throw new Error("Missing NEXT_PUBLIC_API_URL. Add it in frontend/.env.local and Vercel Environment Variables.");
+    throw new ApiRequestError("Missing NEXT_PUBLIC_API_URL. Add it in frontend/.env.local and Vercel Environment Variables.");
   }
 
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
   const formData = new FormData();
   formData.append("file", file);
 
+  const fetchUploadOnce = async (token: string): Promise<Response> => {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+    try {
+      return await fetch(`${API_BASE_URL}/upload-profile-picture`, {
+        method: "POST",
+        body: formData,
+        headers: {
+          ...(token ? { Authorization: `Bearer ${token}` } : {})
+        },
+        credentials: "include",
+        cache: "no-store",
+        signal: controller.signal
+      });
+    } finally {
+      clearTimeout(timeoutId);
+    }
+  };
+
   try {
-    const response = await fetch(`${API_BASE_URL}/upload-profile-picture`, {
-      method: "POST",
-      body: formData,
-      headers: {
-        ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {})
-      },
-      credentials: "include",
-      cache: "no-store",
-      signal: controller.signal
-    });
+    let tokenForRequest = accessToken;
+    let response = await fetchUploadOnce(tokenForRequest);
+
+    if (response.status === 401 && tokenForRequest) {
+      await recoverSessionSilently();
+      const refreshedSession = readSession();
+      tokenForRequest = refreshedSession?.access_token?.trim() || tokenForRequest;
+      response = await fetchUploadOnce(tokenForRequest);
+    }
 
     if (!response.ok) {
       const contentType = response.headers.get("content-type") ?? "";
       if (contentType.includes("application/json")) {
         const errorBody = (await response.json()) as { detail?: unknown };
         const backendMessage = errorMessageFromUnknown(errorBody.detail);
-        throw new Error(backendMessage ?? `Request failed with status ${response.status}`);
+        throw new ApiRequestError(backendMessage ?? `Request failed with status ${response.status}`, response.status);
       }
 
       const errorPayload = await response.text();
-      throw new Error(errorPayload || `Request failed with status ${response.status}`);
+      throw new ApiRequestError(errorPayload || `Request failed with status ${response.status}`, response.status);
     }
 
     return (await response.json()) as AuthUser;
   } catch (error) {
     if (error instanceof DOMException && error.name === "AbortError") {
-      throw new Error("Image upload timed out. Please try again.");
+      throw new ApiRequestError("Image upload timed out. Please try again.");
     }
 
-    if (error instanceof Error) {
+    if (error instanceof ApiRequestError) {
       throw error;
     }
-    throw new Error("Could not upload profile image.");
-  } finally {
-    clearTimeout(timeoutId);
+    if (error instanceof Error) {
+      throw new ApiRequestError(error.message);
+    }
+    throw new ApiRequestError("Could not upload profile image.");
   }
 }

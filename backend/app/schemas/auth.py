@@ -12,6 +12,7 @@ class RegisterRequest(BaseModel):
     email: str = Field(min_length=3, max_length=255)
     password: str = Field(min_length=8, max_length=128)
     name: str = Field(min_length=1, max_length=120)
+    country_code: str = Field(min_length=2, max_length=2)
     gender: GenderValue
     preferred_gender: PreferredGenderValue = "both"
 
@@ -22,6 +23,14 @@ class RegisterRequest(BaseModel):
         if "@" not in lowered:
             raise ValueError("email must be valid")
         return lowered
+
+    @field_validator("country_code")
+    @classmethod
+    def normalize_country_code(cls, value: str) -> str:
+        normalized = value.strip().upper()
+        if len(normalized) != 2:
+            raise ValueError("country_code must be a 2-letter code")
+        return normalized
 
 
 class LoginRequest(BaseModel):
@@ -41,6 +50,7 @@ class AuthUser(BaseModel):
     id: int
     email: str
     name: str
+    country_code: str | None = None
     gender: GenderValue
     preferred_gender: PreferredGenderValue
     profile_image_url: str | None = None
@@ -95,5 +105,16 @@ class VerifyRegistrationRequest(BaseModel):
 
 class UpdateProfileRequest(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=120)
+    country_code: str | None = Field(default=None, min_length=2, max_length=2)
     gender: GenderValue | None = None
     preferred_gender: PreferredGenderValue | None = None
+
+    @field_validator("country_code")
+    @classmethod
+    def normalize_country_code(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip().upper()
+        if len(normalized) != 2:
+            raise ValueError("country_code must be a 2-letter code")
+        return normalized

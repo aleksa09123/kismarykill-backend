@@ -15,6 +15,7 @@ export default function PlayPage() {
   const [session, setSession] = useState<AuthResponse | null>(() => readSession());
   const [user, setUser] = useState<AuthUser | null>(() => readSession()?.user ?? null);
   const [isLoading, setIsLoading] = useState<boolean>(() => readSession() === null);
+  const [warning, setWarning] = useState<string | null>(null);
   const [mode, setMode] = useState<"classic" | "vip">(() => readActiveGameMode());
 
   useEffect(() => {
@@ -40,6 +41,7 @@ export default function PlayPage() {
 
     setSession(currentSession);
     setUser(currentSession.user);
+    setWarning(null);
     setIsLoading(false);
 
     const hydrate = async () => {
@@ -51,10 +53,14 @@ export default function PlayPage() {
           return;
         }
         setUser(refreshedUser);
-      } catch {
-        clearSession();
-        router.replace("/login");
-        return;
+      } catch (hydrateError) {
+        const message =
+          hydrateError instanceof Error
+            ? hydrateError.message
+            : "Could not refresh profile right now.";
+        setWarning(
+          `${message} Session is preserved, so you can retry without logging in again.`
+        );
       } finally {
         setIsLoading(false);
       }
@@ -111,6 +117,11 @@ export default function PlayPage() {
           paddingBottom: "max(env(safe-area-inset-bottom), 0.75rem)"
         }}
       >
+        {warning ? (
+          <p className="mb-3 rounded-2xl border border-amber-300/35 bg-amber-500/15 px-3 py-2 text-sm text-amber-100">
+            {warning}
+          </p>
+        ) : null}
         <GameRound
           accessToken={session.access_token}
           currentUser={user}

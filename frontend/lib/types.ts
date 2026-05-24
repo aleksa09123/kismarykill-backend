@@ -26,6 +26,10 @@ export type GetRoundResponse = {
   users: RoundUser[];
 };
 
+export type GetRoundBatchResponse = {
+  rounds: GetRoundResponse[];
+};
+
 export type ZoneDebugNearestProfile = {
   user_id: number;
   name: string;
@@ -75,13 +79,11 @@ export type BotFeedbackResponse = {
 export type LocationOptionCountry = {
   country_code: string;
   country_name: string;
-  cities: string[];
 };
 
 export type LocationSelectionResponse = {
   country_code: string;
   country_name: string;
-  city: string;
   latitude: number;
   longitude: number;
   server_id: string;
@@ -91,6 +93,7 @@ export type AuthUser = {
   id: number;
   email: string;
   name: string;
+  country_code?: string | null;
   username?: string | null;
   gender: Gender;
   preferred_gender: PreferredGender;
@@ -119,6 +122,7 @@ export type RegisterRequest = {
   email: string;
   password: string;
   name: string;
+  country_code: string;
   gender: Gender;
   preferred_gender: PreferredGender;
 };
@@ -135,6 +139,7 @@ export type VerifyRegistrationRequest = {
 
 export type UpdateProfileRequest = {
   name?: string;
+  country_code?: string;
   gender?: Gender;
   preferred_gender?: PreferredGender;
 };

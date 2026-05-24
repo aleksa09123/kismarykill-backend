@@ -31,6 +31,10 @@ class GetRoundResponse(BaseModel):
     users: list[RoundCandidate]
 
 
+class GetRoundBatchResponse(BaseModel):
+    rounds: list[GetRoundResponse]
+
+
 class ZoneDebugNearestProfile(BaseModel):
     user_id: int
     name: str

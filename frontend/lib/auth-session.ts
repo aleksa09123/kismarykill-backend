@@ -1,9 +1,11 @@
 import type { AuthResponse, AuthUser } from "@/lib/types";
+import { getSupabaseAuthSession } from "@/lib/supabase";
 
 export const AUTH_STORAGE_KEY = "kmk_auth_session";
 
 const PLACEHOLDER_TOKENS = ["placeholder", "default-avatar", "/default-avatar", "avatar-default"];
 let sessionMemoryCache: AuthResponse | null | undefined;
+let ongoingSilentRecovery: Promise<boolean> | null = null;
 
 function parseStoredSession(raw: string): AuthResponse | null {
   try {
@@ -35,7 +37,6 @@ export function readSession(): AuthResponse | null {
 
   const parsed = parseStoredSession(raw);
   if (!parsed) {
-    window.localStorage.removeItem(AUTH_STORAGE_KEY);
     sessionMemoryCache = null;
     return null;
   }
@@ -77,6 +78,33 @@ export function patchSessionUser(nextUser: AuthUser): AuthResponse | null {
 export function refreshSessionFromStorage(): AuthResponse | null {
   sessionMemoryCache = undefined;
   return readSession();
+}
+
+export async function recoverSessionSilently(): Promise<boolean> {
+  if (typeof window === "undefined") {
+    return false;
+  }
+
+  if (ongoingSilentRecovery) {
+    return ongoingSilentRecovery;
+  }
+
+  ongoingSilentRecovery = (async () => {
+    try {
+      await getSupabaseAuthSession();
+    } catch {
+      // Best-effort recovery: if Supabase auth is unavailable, keep local session untouched.
+    }
+
+    const refreshed = refreshSessionFromStorage();
+    return Boolean(refreshed?.access_token);
+  })();
+
+  try {
+    return await ongoingSilentRecovery;
+  } finally {
+    ongoingSilentRecovery = null;
+  }
 }
 
 export function hasUnlockedProfilePhoto(url: string | null | undefined): boolean {

@@ -21,23 +21,20 @@ router = APIRouter(prefix="/location", tags=["location"])
 class LocationSelectionRequest(BaseModel):
     country_code: str = Field(min_length=2, max_length=2)
     country_name: str | None = Field(default=None, min_length=1, max_length=120)
-    city: str = Field(min_length=1, max_length=120)
 
 
 class LocationSelectionResponse(BaseModel):
     country_code: str
     country_name: str
-    city: str
     latitude: float
     longitude: float
     server_id: str
 
 
-def _response_from_context(country_code: str, country_name: str, city: str, latitude: float, longitude: float, server_id: str) -> LocationSelectionResponse:
+def _response_from_context(country_code: str, country_name: str, latitude: float, longitude: float, server_id: str) -> LocationSelectionResponse:
     return LocationSelectionResponse(
         country_code=country_code,
         country_name=country_name,
-        city=city,
         latitude=latitude,
         longitude=longitude,
         server_id=server_id,
@@ -61,7 +58,6 @@ async def get_current_location(
     # Persist last known selector so user profile stays aligned with active server room.
     current_user.country_code = context.country_code
     current_user.country_name = context.country_name
-    current_user.city = context.city
     current_user.latitude = context.latitude
     current_user.longitude = context.longitude
     await session.commit()
@@ -70,7 +66,6 @@ async def get_current_location(
         bot_service = BotSimulationService(session)
         await bot_service.ensure_bots_seeded_for_location(
             country_code=context.country_code,
-            city=context.city,
             country_name=context.country_name,
             latitude=context.latitude,
             longitude=context.longitude,
@@ -91,7 +86,6 @@ async def get_current_location(
     return _response_from_context(
         country_code=context.country_code,
         country_name=context.country_name,
-        city=context.city,
         latitude=context.latitude,
         longitude=context.longitude,
         server_id=context.server_id,
@@ -105,11 +99,10 @@ async def select_location(
     session: AsyncSession = Depends(get_async_session),
     current_user: User = Depends(get_current_user),
 ) -> LocationSelectionResponse:
-    context = normalize_location(payload.country_code, payload.city, payload.country_name)
+    context = normalize_location(payload.country_code, payload.country_name)
 
     current_user.country_code = context.country_code
     current_user.country_name = context.country_name
-    current_user.city = context.city
     current_user.latitude = context.latitude
     current_user.longitude = context.longitude
     await session.commit()
@@ -118,18 +111,16 @@ async def select_location(
     if context.is_global and ENABLE_API_BOTS:
         await bot_service.ensure_bots_seeded_for_location(
             country_code=context.country_code,
-            city=context.city,
             country_name=context.country_name,
             latitude=context.latitude,
             longitude=context.longitude,
             target_count=BOT_TARGET_COUNT,
         )
     elif ENABLE_API_BOTS:
-        # Remove stale global bots and regenerate a fresh local set for the selected city.
+        # Remove stale global bots and regenerate a fresh local set for selected country pool.
         await bot_service.purge_global_bots()
         await bot_service.reset_local_ai_bots_for_location(
             country_code=context.country_code,
-            city=context.city,
             country_name=context.country_name,
             latitude=context.latitude,
             longitude=context.longitude,
@@ -150,7 +141,6 @@ async def select_location(
     return _response_from_context(
         country_code=context.country_code,
         country_name=context.country_name,
-        city=context.city,
         latitude=context.latitude,
         longitude=context.longitude,
         server_id=context.server_id,

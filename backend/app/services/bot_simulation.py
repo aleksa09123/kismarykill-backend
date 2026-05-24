@@ -12,7 +12,7 @@ from sqlalchemy import case, delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
-from app.core.location_context import DEFAULT_LOCATION, GLOBAL_CITY, GLOBAL_COUNTRY_CODE
+from app.core.location_context import DEFAULT_LOCATION, GLOBAL_COUNTRY_CODE
 from app.models.enums import Gender, VoteType
 from app.models.user import User
 from app.models.vote import Vote
@@ -65,10 +65,6 @@ def _as_naive_utc(value: datetime) -> datetime:
     if value.tzinfo is None:
         return value
     return value.astimezone(UTC).replace(tzinfo=None)
-
-
-def _normalized_city_key(city: str) -> str:
-    return city.strip().lower().replace(" ", "_")
 
 
 def _randomuser_nat_for_country(country_code: str) -> str:
@@ -140,9 +136,9 @@ def _fetch_randomuser_results_sync(url: str) -> list[dict[str, object]]:
     return [row for row in rows if isinstance(row, dict)]
 
 
-def _bot_email(prefix: str, country_code: str, city: str, external_uuid: str) -> str:
+def _bot_email(prefix: str, country_code: str, external_uuid: str) -> str:
     normalized_uuid = "".join(ch for ch in external_uuid.lower() if ch.isalnum()) or uuid4().hex
-    return f"{prefix}{country_code.lower()}_{_normalized_city_key(city)}_{normalized_uuid}@kmk.local"
+    return f"{prefix}{country_code.lower()}_{normalized_uuid}@kmk.local"
 
 
 class BotSimulationService:
@@ -157,7 +153,6 @@ class BotSimulationService:
         self,
         *,
         country_code: str,
-        city: str,
         country_name: str,
         latitude: float,
         longitude: float,
@@ -187,7 +182,7 @@ class BotSimulationService:
 
             for row in rows:
                 external_uuid, gender, profile_name, image_url = _profile_from_random_user(row)
-                email = _bot_email(email_prefix, country_code, city, external_uuid)
+                email = _bot_email(email_prefix, country_code, external_uuid)
                 if email in known_emails:
                     continue
 
@@ -208,7 +203,6 @@ class BotSimulationService:
                         age=random.randint(BOT_MIN_AGE, BOT_MAX_AGE),
                         country_code=country_code,
                         country_name=country_name,
-                        city=city,
                         latitude=bot_latitude,
                         longitude=bot_longitude,
                         koordinati=_point_wkt(bot_latitude, bot_longitude),
@@ -226,7 +220,6 @@ class BotSimulationService:
     async def ensure_bots_seeded(self, target_count: int = BOT_TARGET_COUNT) -> int:
         return await self.ensure_bots_seeded_for_location(
             country_code=DEFAULT_LOCATION.country_code,
-            city=DEFAULT_LOCATION.city,
             country_name=DEFAULT_LOCATION.country_name,
             latitude=DEFAULT_LOCATION.latitude,
             longitude=DEFAULT_LOCATION.longitude,
@@ -237,14 +230,12 @@ class BotSimulationService:
         self,
         *,
         country_code: str,
-        city: str,
         exclude_user_id: int | None = None,
     ) -> int:
         stmt = (
             select(func.count(User.id))
             .where(User.is_bot.is_(False))
             .where(User.country_code == country_code)
-            .where(User.city == city)
         )
         if exclude_user_id is not None:
             stmt = stmt.where(User.id != exclude_user_id)
@@ -254,7 +245,6 @@ class BotSimulationService:
         self,
         *,
         country_code: str,
-        city: str,
         exclude_user_id: int | None = None,
         minimum_real_players: int = LOCAL_AI_MIN_REAL_USERS,
     ) -> bool:
@@ -263,7 +253,6 @@ class BotSimulationService:
 
         real_users = await self.count_real_users_in_location(
             country_code=country_code,
-            city=city,
             exclude_user_id=exclude_user_id,
         )
         return real_users < minimum_real_players
@@ -272,7 +261,6 @@ class BotSimulationService:
         self,
         *,
         country_code: str,
-        city: str,
         country_name: str,
         latitude: float,
         longitude: float,
@@ -287,7 +275,6 @@ class BotSimulationService:
                 select(User)
                 .where(User.is_bot.is_(True))
                 .where(User.country_code == country_code)
-                .where(User.city == city)
                 .where(User.email.is_not(None))
                 .where(User.email.startswith(LOCAL_AI_EMAIL_PREFIX))
             )
@@ -298,7 +285,6 @@ class BotSimulationService:
                 delete(User)
                 .where(User.is_bot.is_(True))
                 .where(User.country_code == country_code)
-                .where(User.city == city)
                 .where(User.email.is_not(None))
                 .where(User.email.startswith(LOCAL_AI_EMAIL_PREFIX))
             )
@@ -311,7 +297,6 @@ class BotSimulationService:
 
         created = await self._seed_randomuser_bots(
             country_code=country_code,
-            city=city,
             country_name=country_name,
             latitude=latitude,
             longitude=longitude,
@@ -326,7 +311,6 @@ class BotSimulationService:
         self,
         *,
         country_code: str,
-        city: str,
         exclude_user_id: int | None = None,
         limit: int = LOCAL_AI_BOT_TARGET_COUNT,
     ) -> list[User]:
@@ -337,7 +321,6 @@ class BotSimulationService:
             select(User)
             .where(User.is_bot.is_(True))
             .where(User.country_code == country_code)
-            .where(User.city == city)
             .where(User.email.is_not(None))
             .where(User.email.startswith(LOCAL_AI_EMAIL_PREFIX))
         )
@@ -351,13 +334,11 @@ class BotSimulationService:
         self,
         *,
         country_code: str,
-        city: str,
     ) -> int:
         result = await self.session.execute(
             delete(User)
             .where(User.is_bot.is_(True))
             .where(User.country_code == country_code)
-            .where(User.city == city)
             .where(User.email.is_not(None))
             .where(User.email.startswith(LOCAL_AI_EMAIL_PREFIX))
         )
@@ -368,7 +349,6 @@ class BotSimulationService:
         self,
         *,
         country_code: str,
-        city: str,
         country_name: str,
         latitude: float,
         longitude: float,
@@ -376,7 +356,6 @@ class BotSimulationService:
     ) -> int:
         return await self.ensure_local_ai_bots_for_location(
             country_code=country_code,
-            city=city,
             country_name=country_name,
             latitude=latitude,
             longitude=longitude,
@@ -391,7 +370,6 @@ class BotSimulationService:
             .where(
                 or_(
                     User.country_code == GLOBAL_COUNTRY_CODE,
-                    User.city == GLOBAL_CITY,
                     User.email.like("bot_gl_%@kmk.local"),
                     User.email.like(f"{GLOBAL_AI_EMAIL_PREFIX}%"),
                 )
@@ -404,7 +382,6 @@ class BotSimulationService:
         self,
         *,
         country_code: str,
-        city: str,
         user_ids: list[int],
     ) -> bool:
         if not self.api_bots_enabled:
@@ -418,7 +395,6 @@ class BotSimulationService:
             .where(User.id.in_(set(user_ids)))
             .where(User.is_bot.is_(True))
             .where(User.country_code == country_code)
-            .where(User.city == city)
             .where(User.email.is_not(None))
             .where(User.email.startswith(LOCAL_AI_EMAIL_PREFIX))
         )
@@ -429,7 +405,6 @@ class BotSimulationService:
         *,
         user_id: int,
         country_code: str,
-        city: str,
         local_bot_ids: list[int],
         probability: float = LOCAL_AI_FEED_PROBABILITY,
     ) -> bool:
@@ -445,7 +420,6 @@ class BotSimulationService:
                 .where(User.id.in_(set(local_bot_ids)))
                 .where(User.is_bot.is_(True))
                 .where(User.country_code == country_code)
-                .where(User.city == city)
                 .where(User.email.is_not(None))
                 .where(User.email.startswith(LOCAL_AI_EMAIL_PREFIX))
             )
@@ -470,7 +444,6 @@ class BotSimulationService:
         self,
         *,
         country_code: str,
-        city: str,
         country_name: str,
         latitude: float,
         longitude: float,
@@ -484,7 +457,6 @@ class BotSimulationService:
                 select(User)
                 .where(User.is_bot.is_(True))
                 .where(User.country_code == country_code)
-                .where(User.city == city)
                 .where(User.email.is_not(None))
                 .where(User.email.startswith(GLOBAL_AI_EMAIL_PREFIX))
             )
@@ -496,7 +468,6 @@ class BotSimulationService:
 
         created = await self._seed_randomuser_bots(
             country_code=country_code,
-            city=city,
             country_name=country_name,
             latitude=latitude,
             longitude=longitude,
@@ -519,7 +490,6 @@ class BotSimulationService:
         user: User,
         *,
         country_code: str,
-        city: str,
     ) -> int:
         if not self.api_bots_enabled:
             return 0
@@ -529,7 +499,6 @@ class BotSimulationService:
                 select(User)
                 .where(User.is_bot.is_(True))
                 .where(User.country_code == country_code)
-                .where(User.city == city)
                 .where(User.id != user.id)
             )
         ).scalars().all()
@@ -543,7 +512,6 @@ class BotSimulationService:
             .where(Vote.target_id == user.id)
             .where(User.is_bot.is_(True))
             .where(User.country_code == country_code)
-            .where(User.city == city)
         )
 
         now = datetime.utcnow()
@@ -586,7 +554,6 @@ class BotSimulationService:
         user_id: int,
         *,
         country_code: str,
-        city: str,
         include_bots: bool,
         limit: int = 12,
     ) -> BotFeedbackResponse:
@@ -608,7 +575,6 @@ class BotSimulationService:
             .join(target, Vote.target_id == target.id)
             .where(voter.is_bot.is_(actor_is_bot))
             .where(voter.country_code == country_code)
-            .where(voter.city == city)
         )
 
         if include_bots:
@@ -617,7 +583,6 @@ class BotSimulationService:
             reaction_stmt = (
                 reaction_stmt.where(target.is_bot.is_(False))
                 .where(target.country_code == country_code)
-                .where(target.city == city)
             )
 
         reactions = (
@@ -637,7 +602,6 @@ class BotSimulationService:
                 .where(Vote.target_id == user_id)
                 .where(voter_counts.is_bot.is_(actor_is_bot))
                 .where(voter_counts.country_code == country_code)
-                .where(voter_counts.city == city)
             )
         ).one()
 

@@ -2,13 +2,12 @@ from __future__ import annotations
 
 import random
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Query
 from sqlalchemy import Integer, case, cast, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import get_current_user
 from app.core.database import get_async_session
-from app.core.location_context import decode_location_cookie_value
 from app.models.enums import VoteType
 from app.models.user import User
 from app.models.vote import Vote
@@ -18,13 +17,8 @@ from app.services.bot_simulation import ENABLE_API_BOTS, LOCAL_AI_BOT_TARGET_COU
 router = APIRouter(tags=["leaderboard"])
 
 
-def _synthetic_local_stats(
-    *,
-    bot_id: int,
-    country_code: str,
-    city: str,
-) -> tuple[int, int, int, int, float]:
-    seeded = random.Random(f"{country_code}|{city}|{bot_id}")
+def _synthetic_local_stats(*, bot_id: int, country_code: str) -> tuple[int, int, int, int, float]:
+    seeded = random.Random(f"{country_code}|{bot_id}")
     rounds_played = seeded.randint(140, 540)
     win_rate = round(seeded.uniform(62.0, 97.0), 1)
     score = int(rounds_played * (win_rate / 100.0) * seeded.uniform(4.5, 8.0))
@@ -34,27 +28,36 @@ def _synthetic_local_stats(
     return score, kisses, marries, kills, win_rate
 
 
+def _normalized_country_filter(country_code: str | None) -> str | None:
+    if not country_code:
+        return None
+    normalized = country_code.strip().upper()
+    if len(normalized) != 2:
+        return None
+    if normalized == "GL":
+        return None
+    return normalized
+
+
 @router.get("/leaderboard", response_model=LeaderboardResponse)
 async def get_leaderboard(
-    request: Request,
+    country_code: str | None = Query(default=None, min_length=2, max_length=2),
     _: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_async_session),
 ) -> LeaderboardResponse:
-    location_context = decode_location_cookie_value(request.cookies.get("user_location"))
+    normalized_country = _normalized_country_filter(country_code)
 
-    if not location_context.is_global and ENABLE_API_BOTS:
+    if normalized_country and ENABLE_API_BOTS:
         bot_service = BotSimulationService(session)
         await bot_service.ensure_local_ai_bots_for_location(
-            country_code=location_context.country_code,
-            city=location_context.city,
-            country_name=location_context.country_name,
-            latitude=location_context.latitude,
-            longitude=location_context.longitude,
+            country_code=normalized_country,
+            country_name=normalized_country,
+            latitude=0.0,
+            longitude=0.0,
             target_count=LOCAL_AI_BOT_TARGET_COUNT,
         )
         local_bots = await bot_service.get_local_ai_bots_for_location(
-            country_code=location_context.country_code,
-            city=location_context.city,
+            country_code=normalized_country,
             limit=LOCAL_AI_BOT_TARGET_COUNT,
         )
 
@@ -62,8 +65,7 @@ async def get_leaderboard(
         for bot in local_bots:
             score, kisses, marries, kills, win_rate = _synthetic_local_stats(
                 bot_id=bot.id,
-                country_code=location_context.country_code,
-                city=location_context.city,
+                country_code=normalized_country,
             )
             leaderboard_rows.append(
                 LeaderboardEntry(
@@ -84,7 +86,7 @@ async def get_leaderboard(
             leaderboard_rows,
             key=lambda entry: (entry.score, entry.rounds_played, entry.win_rate),
             reverse=True,
-        )[:10]
+        )[:100]
         ranked = [
             LeaderboardEntry(
                 rank=index + 1,
@@ -131,8 +133,6 @@ async def get_leaderboard(
             func.coalesce(kills_expr, zero).label("kills"),
         )
         .outerjoin(Vote, Vote.target_id == User.id)
-        .where(User.country_code == location_context.country_code)
-        .where(User.city == location_context.city)
         .group_by(User.id, User.ime, User.profile_image_url, User.slika_url)
         .order_by(
             func.coalesce(score_expr, zero).desc(),
@@ -142,6 +142,8 @@ async def get_leaderboard(
         )
         .limit(100)
     )
+    if normalized_country:
+        stmt = stmt.where(User.country_code == normalized_country)
     if not ENABLE_API_BOTS:
         stmt = stmt.where(User.is_bot.is_(False))
 

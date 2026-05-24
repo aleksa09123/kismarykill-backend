@@ -7,6 +7,9 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+import httpx
+from supabase import Client, create_client
+from supabase.lib.client_options import SyncClientOptions
 
 BACKEND_DIR = os.path.dirname(os.path.abspath(__file__))
 if BACKEND_DIR not in sys.path:
@@ -22,14 +25,77 @@ from app.core.database import AsyncSessionLocal, init_db
 from app.services.bot_simulation import ENABLE_API_BOTS, BotSimulationService
 
 
+def _create_supabase_client() -> tuple[Client | None, httpx.Client | None]:
+    url = (settings.supabase_url or "").strip()
+    key = (settings.supabase_key or "").strip()
+    if not url or not key:
+        return None, None
+
+    http_client = httpx.Client(
+        timeout=httpx.Timeout(30.0),
+        limits=httpx.Limits(
+            max_connections=100,
+            max_keepalive_connections=40,
+            keepalive_expiry=45.0,
+        ),
+    )
+    options = SyncClientOptions(
+        auto_refresh_token=False,
+        persist_session=False,
+        httpx_client=http_client,
+        postgrest_client_timeout=30,
+        storage_client_timeout=30,
+        function_client_timeout=30,
+    )
+    return create_client(url, key, options=options), http_client
+
+
+def _close_supabase_client(
+    *,
+    supabase_client: Client | None,
+    http_client: httpx.Client | None,
+) -> None:
+    if supabase_client is not None:
+        auth_client = getattr(supabase_client, "auth", None)
+        if auth_client is not None and hasattr(auth_client, "close"):
+            try:
+                auth_client.close()
+            except Exception:
+                pass
+
+        for component_name in ("postgrest", "storage"):
+            component = getattr(supabase_client, component_name, None)
+            session = getattr(component, "session", None)
+            if session is not None and hasattr(session, "close"):
+                try:
+                    session.close()
+                except Exception:
+                    pass
+
+    if http_client is not None and not http_client.is_closed:
+        try:
+            http_client.close()
+        except Exception:
+            pass
+
+
 @asynccontextmanager
-async def lifespan(_: FastAPI):
+async def lifespan(app: FastAPI):
+    supabase_client, supabase_http_client = _create_supabase_client()
+    app.state.supabase = supabase_client
+    app.state.supabase_http_client = supabase_http_client
     await init_db()
     if ENABLE_API_BOTS:
         async with AsyncSessionLocal() as session:
             bot_service = BotSimulationService(session)
             await bot_service.ensure_bots_seeded()
-    yield
+    try:
+        yield
+    finally:
+        _close_supabase_client(
+            supabase_client=supabase_client,
+            http_client=supabase_http_client,
+        )
 
 
 app = FastAPI(
@@ -43,11 +109,12 @@ os.makedirs(uploads_dir, exist_ok=True)
 
 app.add_middleware(
     CORSMiddleware,
-    # Temporary production debug mode:
-    # keep CORS fully open until frontend/backend integration is verified.
-    allow_origins=["*"],
+    allow_origins=[
+        "https://kissmerrykil.com",
+        "https://www.kissmerrykil.com",
+        "https://kiss-merry-kill.vercel.app",
+    ],
     allow_credentials=True,
-    # '*' includes OPTIONS and all standard HTTP methods for preflight/actual requests.
     allow_methods=["*"],
     allow_headers=["*"],
     allow_private_network=True,

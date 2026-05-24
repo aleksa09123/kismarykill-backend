@@ -7,7 +7,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { PremiumLiveFeedModel } from "@/components/premium-live-feed-model";
 import { ReferralUnlockModal } from "@/components/referral-unlock-modal";
-import { fetchBotFeedback, fetchCurrentLocation, setCurrentLocation } from "@/lib/api";
+import { fetchBotFeedback, fetchCurrentLocation, fetchLocationOptions, setCurrentLocation } from "@/lib/api";
 import { AUTH_STORAGE_KEY, hasUnlockedProfilePhoto, readSession, refreshSessionFromStorage } from "@/lib/auth-session";
 import { ENABLE_API_BOTS } from "@/lib/feature-flags";
 import {
@@ -40,28 +40,13 @@ const reactionStyle: Record<VoteType, string> = {
 
 const premiumFeedDescription = "Unlock your Live Feed to see exactly who Kissed, Married, or Killed you!";
 const LOCATION_SYNC_TIMEOUT_MS = 12000;
-const COUNTRIES_NOW_COUNTRIES_ENDPOINT = "https://countriesnow.space/api/v0.1/countries";
-const COUNTRIES_NOW_CITIES_ENDPOINT = "https://countriesnow.space/api/v0.1/countries/cities";
 const MAX_LOCATION_RESULTS = 250;
 const LOCATION_SELECTION_STORAGE_KEY = "kmk_selected_location_v1";
 const GLOBAL_LOCATION_OPTION: LocationOptionCountry = {
   country_code: "GL",
-  country_name: "Global",
-  cities: ["Global"]
+  country_name: "Global"
 };
 let cachedLocationOptions: LocationOptionCountry[] | null = null;
-let cachedCountryCitiesByCode: Record<string, string[]> | null = null;
-
-type CountriesNowCountry = {
-  country?: string;
-  iso2?: string;
-};
-
-type CountriesNowResponse<T> = {
-  error?: boolean;
-  msg?: string;
-  data?: T;
-};
 
 type IconProps = {
   className?: string;
@@ -244,27 +229,26 @@ function readLocationCookieClient(): LocationSelectionResponse | null {
   try {
     const rawValue = item.split("=")[1] ?? "";
     const parsed = JSON.parse(decodeURIComponent(rawValue)) as Partial<LocationSelectionResponse>;
-    if (!parsed.country_code || !parsed.country_name || !parsed.city) {
+    if (!parsed.country_code || !parsed.country_name) {
       return null;
     }
     return {
       country_code: parsed.country_code,
       country_name: parsed.country_name,
-      city: parsed.city,
       latitude: Number(parsed.latitude ?? 0),
       longitude: Number(parsed.longitude ?? 0),
       server_id:
         typeof parsed.server_id === "string" && parsed.server_id.length > 0
           ? parsed.server_id
-          : `${parsed.country_code.toLowerCase()}_${parsed.city.toLowerCase().replace(/\s+/g, "_")}`
+          : parsed.country_code.toLowerCase()
     };
   } catch {
     return null;
   }
 }
 
-function buildServerId(countryCode: string, city: string): string {
-  return `${countryCode.toLowerCase()}_${city.toLowerCase().replace(/\s+/g, "_")}`;
+function buildServerId(countryCode: string): string {
+  return countryCode.toLowerCase();
 }
 
 function readPersistedLocationClient(): LocationSelectionResponse | null {
@@ -277,19 +261,18 @@ function readPersistedLocationClient(): LocationSelectionResponse | null {
   }
   try {
     const parsed = JSON.parse(raw) as Partial<LocationSelectionResponse>;
-    if (!parsed.country_code || !parsed.country_name || !parsed.city) {
+    if (!parsed.country_code || !parsed.country_name) {
       return null;
     }
     return {
       country_code: parsed.country_code,
       country_name: parsed.country_name,
-      city: parsed.city,
       latitude: Number(parsed.latitude ?? 0),
       longitude: Number(parsed.longitude ?? 0),
       server_id:
         typeof parsed.server_id === "string" && parsed.server_id.trim().length > 0
           ? parsed.server_id
-          : buildServerId(parsed.country_code, parsed.city)
+          : buildServerId(parsed.country_code)
     };
   } catch {
     return null;
@@ -305,44 +288,6 @@ function persistLocationClient(location: LocationSelectionResponse): void {
 
 function readInitialLocationClient(): LocationSelectionResponse | null {
   return readPersistedLocationClient() ?? readLocationCookieClient();
-}
-
-function normalizeCountriesNowCountries(payload: CountriesNowResponse<unknown>): LocationOptionCountry[] {
-  const rows = Array.isArray(payload?.data) ? payload.data : [];
-  const byCode = new Map<string, LocationOptionCountry>();
-  rows.forEach((row) => {
-      if (!row || typeof row !== "object") {
-        return;
-      }
-      const next = row as CountriesNowCountry;
-      const countryName = typeof next.country === "string" ? next.country.trim() : "";
-      const countryCode = typeof next.iso2 === "string" ? next.iso2.trim().toUpperCase() : "";
-      if (!countryName || countryCode.length !== 2) {
-        return;
-      }
-      byCode.set(countryCode, {
-        country_code: countryCode,
-        country_name: countryName,
-        cities: []
-      });
-    });
-
-  const normalized = Array.from(byCode.values())
-    .sort((a, b) => a.country_name.localeCompare(b.country_name));
-
-  return [GLOBAL_LOCATION_OPTION, ...normalized];
-}
-
-function normalizeCities(payload: CountriesNowResponse<unknown>): string[] {
-  const rows = Array.isArray(payload?.data) ? payload.data : [];
-  const uniqueCities = new Set(
-    rows
-      .filter((city): city is string => typeof city === "string")
-      .map((city) => city.trim())
-      .filter((city) => city.length > 0)
-  );
-
-  return Array.from(uniqueCities).sort((a, b) => a.localeCompare(b));
 }
 
 function ProfileFallback() {
@@ -374,20 +319,13 @@ export default function DashboardPage() {
   const [locationOptions, setLocationOptions] = useState<LocationOptionCountry[]>(() =>
     cachedLocationOptions ?? [GLOBAL_LOCATION_OPTION]
   );
-  const [countryCitiesByCode, setCountryCitiesByCode] = useState<Record<string, string[]>>(() =>
-    cachedCountryCitiesByCode ?? { [GLOBAL_LOCATION_OPTION.country_code]: GLOBAL_LOCATION_OPTION.cities }
-  );
   const [isLoadingLocationOptions, setIsLoadingLocationOptions] = useState(true);
-  const [isLoadingCountryCities, setIsLoadingCountryCities] = useState(false);
   const [countrySearchQuery, setCountrySearchQuery] = useState("");
-  const [citySearchQuery, setCitySearchQuery] = useState("");
   const [isLocationPickerOpen, setIsLocationPickerOpen] = useState(false);
   const [selectedCountryCode, setSelectedCountryCode] = useState<string>(() => readInitialLocationClient()?.country_code ?? "");
   const [selectedCountryName, setSelectedCountryName] = useState<string>(() => readInitialLocationClient()?.country_name ?? "");
-  const [selectedCity, setSelectedCity] = useState<string>(() => readInitialLocationClient()?.city ?? "");
   const locationUpdateRequestRef = useRef(0);
   const locationOptionsRequestRef = useRef(0);
-  const locationCitiesRequestRef = useRef(0);
   const dashboardSyncRequestRef = useRef(0);
   const hasInitializedDashboardRef = useRef(false);
   const hasHydratedModeRef = useRef(false);
@@ -402,7 +340,6 @@ export default function DashboardPage() {
       dashboardSyncRequestRef.current += 1;
       locationUpdateRequestRef.current += 1;
       locationOptionsRequestRef.current += 1;
-      locationCitiesRequestRef.current += 1;
     };
   }, []);
 
@@ -423,7 +360,6 @@ export default function DashboardPage() {
         setCurrentLocationState(nextLocation);
         setSelectedCountryCode(nextLocation.country_code);
         setSelectedCountryName(nextLocation.country_name);
-        setSelectedCity(nextLocation.city);
       }
 
       setSelectedMode(readActiveGameMode());
@@ -495,9 +431,6 @@ export default function DashboardPage() {
   const loadLocationOptions = useCallback(async () => {
     if (cachedLocationOptions) {
       setLocationOptions(cachedLocationOptions);
-      setCountryCitiesByCode(
-        cachedCountryCitiesByCode ?? { [GLOBAL_LOCATION_OPTION.country_code]: GLOBAL_LOCATION_OPTION.cities }
-      );
       setIsLoadingLocationOptions(false);
       return;
     }
@@ -505,15 +438,19 @@ export default function DashboardPage() {
     const requestId = ++locationOptionsRequestRef.current;
     setIsLoadingLocationOptions(true);
     try {
-      const response = await fetch(COUNTRIES_NOW_COUNTRIES_ENDPOINT, {
-        method: "GET",
-        cache: "no-store"
-      });
-      if (!response.ok) {
-        throw new Error("Could not load global countries list.");
-      }
-      const payload = (await response.json()) as CountriesNowResponse<unknown>;
-      const normalizedCountries = normalizeCountriesNowCountries(payload);
+      const payload = await fetchLocationOptions();
+      const normalizedCountries = [
+        GLOBAL_LOCATION_OPTION,
+        ...payload
+          .map((country) => ({
+            country_code: country.country_code,
+            country_name: country.country_name,
+          }))
+          .filter((country) => country.country_code && country.country_name)
+          .filter((country, index, list) => index === list.findIndex((item) => item.country_code === country.country_code))
+          .filter((country) => country.country_code !== GLOBAL_LOCATION_OPTION.country_code)
+          .sort((a, b) => a.country_name.localeCompare(b.country_name)),
+      ];
       if (requestId !== locationOptionsRequestRef.current || !isComponentMountedRef.current) {
         return;
       }
@@ -531,76 +468,6 @@ export default function DashboardPage() {
       }
     }
   }, []);
-
-  const loadCitiesForCountry = useCallback(
-    async (country: LocationOptionCountry | null) => {
-      if (!country) {
-        return;
-      }
-      if (country.country_code === GLOBAL_LOCATION_OPTION.country_code) {
-        setCountryCitiesByCode((previous) =>
-          previous[GLOBAL_LOCATION_OPTION.country_code]
-            ? previous
-            : { ...previous, [GLOBAL_LOCATION_OPTION.country_code]: GLOBAL_LOCATION_OPTION.cities }
-        );
-        return;
-      }
-
-      if (cachedCountryCitiesByCode?.[country.country_code]?.length) {
-        setCountryCitiesByCode((previous) => ({
-          ...previous,
-          [country.country_code]: cachedCountryCitiesByCode?.[country.country_code] ?? []
-        }));
-        return;
-      }
-
-      if (countryCitiesByCode[country.country_code]?.length) {
-        return;
-      }
-
-      const requestId = ++locationCitiesRequestRef.current;
-      setIsLoadingCountryCities(true);
-      try {
-        const response = await fetch(COUNTRIES_NOW_CITIES_ENDPOINT, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json"
-          },
-          body: JSON.stringify({ country: country.country_name }),
-          cache: "no-store"
-        });
-        if (!response.ok) {
-          throw new Error("Could not load cities for selected country.");
-        }
-        const payload = (await response.json()) as CountriesNowResponse<unknown>;
-        const cities = normalizeCities(payload);
-
-        if (requestId !== locationCitiesRequestRef.current || !isComponentMountedRef.current) {
-          return;
-        }
-
-        setCountryCitiesByCode((previous) => ({ ...previous, [country.country_code]: cities }));
-        cachedCountryCitiesByCode = {
-          ...(cachedCountryCitiesByCode ?? {}),
-          [country.country_code]: cities
-        };
-        setLocationOptions((previous) =>
-          previous.map((option) => (option.country_code === country.country_code ? { ...option, cities } : option))
-        );
-        setSelectedCity((previous) => (previous && cities.includes(previous) ? previous : cities[0] ?? ""));
-      } catch {
-        if (requestId !== locationCitiesRequestRef.current || !isComponentMountedRef.current) {
-          return;
-        }
-        setCountryCitiesByCode((previous) => ({ ...previous, [country.country_code]: [] }));
-      } finally {
-        if (requestId === locationCitiesRequestRef.current && isComponentMountedRef.current) {
-          setIsLoadingCountryCities(false);
-        }
-      }
-    },
-    [countryCitiesByCode]
-  );
 
   useEffect(() => {
     void loadLocationOptions();
@@ -654,7 +521,6 @@ export default function DashboardPage() {
         setCurrentLocationState(resolvedLocation);
         setSelectedCountryCode(resolvedLocation.country_code);
         setSelectedCountryName(resolvedLocation.country_name);
-        setSelectedCity(resolvedLocation.city);
         persistLocationClient(resolvedLocation);
       }
 
@@ -685,15 +551,6 @@ export default function DashboardPage() {
       (selectedCountryCode === GLOBAL_LOCATION_OPTION.country_code ? GLOBAL_LOCATION_OPTION : null),
     [locationOptions, selectedCountryCode]
   );
-  const selectedCountryCities = useMemo(() => {
-    if (!selectedCountryCode) {
-      return [];
-    }
-    if (selectedCountryCode === GLOBAL_LOCATION_OPTION.country_code) {
-      return GLOBAL_LOCATION_OPTION.cities;
-    }
-    return countryCitiesByCode[selectedCountryCode] ?? selectedCountry?.cities ?? [];
-  }, [countryCitiesByCode, selectedCountry?.cities, selectedCountryCode]);
   const filteredCountries = useMemo(() => {
     const query = countrySearchQuery.trim().toLowerCase();
     const list = query
@@ -706,21 +563,8 @@ export default function DashboardPage() {
     }
     return limited;
   }, [countrySearchQuery, locationOptions, selectedCountryCode]);
-  const filteredCities = useMemo(() => {
-    const query = citySearchQuery.trim().toLowerCase();
-    const list = query
-      ? selectedCountryCities.filter((city) => city.toLowerCase().includes(query))
-      : selectedCountryCities;
-    const limited = list.slice(0, MAX_LOCATION_RESULTS);
-    if (selectedCity && list.includes(selectedCity) && !limited.includes(selectedCity)) {
-      return [selectedCity, ...limited.slice(0, Math.max(0, MAX_LOCATION_RESULTS - 1))];
-    }
-    return limited;
-  }, [citySearchQuery, selectedCity, selectedCountryCities]);
   const selectorCountryCode = selectedCountryCode || currentLocation?.country_code || GLOBAL_LOCATION_OPTION.country_code;
-  const selectorCity = selectedCity || currentLocation?.city || GLOBAL_LOCATION_OPTION.cities[0];
   const connectedCountryLabel = selectedCountryName || currentLocation?.country_name || GLOBAL_LOCATION_OPTION.country_name;
-  const connectedCityLabel = selectedCity || currentLocation?.city || GLOBAL_LOCATION_OPTION.cities[0];
   const referralTarget = 5;
   const referralCount = Math.max(
     0,
@@ -753,21 +597,14 @@ export default function DashboardPage() {
   }, [selectedMode, session]);
 
   useEffect(() => {
-    if (!isLocationPickerOpen) {
-      return;
-    }
-    void loadCitiesForCountry(selectedCountry);
-  }, [isLocationPickerOpen, loadCitiesForCountry, selectedCountry]);
-
-  useEffect(() => {
     if (!selectedCountryName && selectedCountry) {
       setSelectedCountryName(selectedCountry.country_name);
     }
   }, [selectedCountry, selectedCountryName]);
 
   const syncLocationAndRefreshContext = useCallback(
-    async (countryCode: string, city: string, keepModalOpen = true) => {
-      if (!session || !countryCode || !city) {
+    async (countryCode: string, keepModalOpen = true) => {
+      if (!session || !countryCode) {
         return;
       }
 
@@ -775,17 +612,15 @@ export default function DashboardPage() {
       const draftLocation: LocationSelectionResponse = {
         country_code: countryCode,
         country_name: nextCountryName,
-        city,
         latitude: 0,
         longitude: 0,
-        server_id: buildServerId(countryCode, city)
+        server_id: buildServerId(countryCode)
       };
 
       // Lock user choice immediately so the selector survives re-renders/network jitter.
       setCurrentLocationState(draftLocation);
       setSelectedCountryCode(countryCode);
       setSelectedCountryName(nextCountryName);
-      setSelectedCity(city);
       persistLocationClient(draftLocation);
       setBotFeedback(null);
 
@@ -814,7 +649,6 @@ export default function DashboardPage() {
           {
             country_code: countryCode,
             country_name: nextCountryName,
-            city
           },
           session.access_token
           ),
@@ -847,7 +681,6 @@ export default function DashboardPage() {
         setCurrentLocationState(() => resolvedLocation);
         setSelectedCountryCode(() => resolvedLocation.country_code);
         setSelectedCountryName(() => resolvedLocation.country_name);
-        setSelectedCity(() => resolvedLocation.city);
         persistLocationClient(resolvedLocation);
 
         if (!keepModalOpen) {
@@ -899,14 +732,14 @@ export default function DashboardPage() {
 
   const applySelectedLocation = async () => {
     if (!currentLocation) {
-      await syncLocationAndRefreshContext(selectedCountryCode, selectedCity, false);
+      await syncLocationAndRefreshContext(selectedCountryCode, false);
       return;
     }
-    if (currentLocation.country_code === selectedCountryCode && currentLocation.city === selectedCity) {
+    if (currentLocation.country_code === selectedCountryCode) {
       setIsLocationPickerOpen(false);
       return;
     }
-    await syncLocationAndRefreshContext(selectedCountryCode, selectedCity, false);
+    await syncLocationAndRefreshContext(selectedCountryCode, false);
   };
 
   const startPlay = async () => {
@@ -917,10 +750,9 @@ export default function DashboardPage() {
     const locationForPlay: LocationSelectionResponse = {
       country_code: selectorCountryCode,
       country_name: connectedCountryLabel,
-      city: connectedCityLabel,
       latitude: currentLocation?.latitude ?? 0,
       longitude: currentLocation?.longitude ?? 0,
-      server_id: buildServerId(selectorCountryCode, connectedCityLabel)
+      server_id: buildServerId(selectorCountryCode)
     };
 
     setCurrentLocationState(locationForPlay);
@@ -933,8 +765,7 @@ export default function DashboardPage() {
       await setCurrentLocation(
         {
           country_code: locationForPlay.country_code,
-          country_name: locationForPlay.country_name,
-          city: locationForPlay.city
+          country_name: locationForPlay.country_name
         },
         session.access_token
       );
@@ -945,8 +776,7 @@ export default function DashboardPage() {
     const params = new URLSearchParams({
       mode: selectedMode,
       country_code: locationForPlay.country_code,
-      country_name: locationForPlay.country_name,
-      city: locationForPlay.city
+      country_name: locationForPlay.country_name
     });
     writeActiveGameMode(selectedMode);
     router.push(`/play?${params.toString()}`);
@@ -992,7 +822,6 @@ export default function DashboardPage() {
                 if (!selectedCountryCode) {
                   setSelectedCountryCode(currentLocation?.country_code ?? GLOBAL_LOCATION_OPTION.country_code);
                   setSelectedCountryName(currentLocation?.country_name ?? GLOBAL_LOCATION_OPTION.country_name);
-                  setSelectedCity(currentLocation?.city ?? GLOBAL_LOCATION_OPTION.cities[0]);
                 }
                 setIsLocationPickerOpen((open) => !open);
               }}
@@ -1000,7 +829,7 @@ export default function DashboardPage() {
             >
               <GlobeIcon className="h-3.5 w-3.5 shrink-0 text-cyan-200" />
               <span className="min-w-0 flex-1 truncate text-left text-[11px] sm:text-xs">
-                {isMounted ? `${selectorCountryCode} - ${selectorCity}` : "Select Location"}
+                {isMounted ? `${selectorCountryCode} - ${connectedCountryLabel}` : "Select Country"}
               </span>
               <ChevronDownIcon className="h-3.5 w-3.5 shrink-0 text-blue-200/80" />
             </button>
@@ -1042,13 +871,6 @@ export default function DashboardPage() {
                             onClick={() => {
                               setSelectedCountryCode(country.country_code);
                               setSelectedCountryName(country.country_name);
-                              setSelectedCity(
-                                country.country_code === GLOBAL_LOCATION_OPTION.country_code
-                                  ? GLOBAL_LOCATION_OPTION.cities[0]
-                                  : (countryCitiesByCode[country.country_code]?.[0] ?? "")
-                              );
-                              setCitySearchQuery("");
-                              void loadCitiesForCountry(country);
                             }}
                             className={`flex min-h-10 w-full touch-manipulation items-center rounded-xl px-3 py-2 text-left text-sm transition-colors duration-150 ${
                               isSelected ? "bg-cyan-500/25 text-cyan-100" : "text-slate-200 active:bg-slate-700/35"
@@ -1064,46 +886,6 @@ export default function DashboardPage() {
                     </div>
                   </div>
 
-                  <div>
-                    <p className="mb-1 block text-[11px] font-semibold uppercase tracking-[0.18em] text-blue-200/70">City</p>
-                    <input
-                      type="text"
-                      value={citySearchQuery}
-                      onChange={(event) => setCitySearchQuery(event.target.value)}
-                      placeholder="Search city..."
-                      disabled={!selectedCountryCode}
-                      className="mb-1.5 h-9 w-full rounded-xl border border-blue-300/20 bg-[#071535] px-3 text-xs text-slate-100 placeholder:text-slate-400/80 outline-none focus:border-cyan-300/45 disabled:cursor-not-allowed disabled:opacity-60"
-                    />
-                    <div className="max-h-36 overflow-y-auto rounded-2xl border border-blue-300/20 bg-[#071535] p-1">
-                      {isLoadingCountryCities && (
-                        <p className="px-3 py-2 text-xs text-slate-300">Loading cities...</p>
-                      )}
-                      {!isLoadingCountryCities &&
-                        filteredCities.map((city) => {
-                        const isSelected = selectedCity === city;
-                        return (
-                          <button
-                            key={city}
-                            type="button"
-                            onClick={() => setSelectedCity(city)}
-                            className={`flex min-h-10 w-full touch-manipulation items-center rounded-xl px-3 py-2 text-left text-sm transition-colors duration-150 ${
-                              isSelected ? "bg-blue-500/25 text-blue-100" : "text-slate-200 active:bg-slate-700/35"
-                            }`}
-                          >
-                            {city}
-                          </button>
-                        );
-                        })}
-                      {!isLoadingCountryCities && selectedCountryCode && filteredCities.length === 0 && (
-                        <p className="px-3 py-2 text-xs text-slate-300">
-                          {selectedCountryCode === GLOBAL_LOCATION_OPTION.country_code
-                            ? "Global server ready."
-                            : "No cities found for this country."}
-                        </p>
-                      )}
-                      {!selectedCountryCode && <p className="px-3 py-2 text-xs text-slate-300">Select a country first.</p>}
-                    </div>
-                  </div>
                 </div>
 
                 <button
@@ -1111,7 +893,7 @@ export default function DashboardPage() {
                   onClick={() => {
                     void applySelectedLocation();
                   }}
-                  disabled={isChangingLocation || !selectedCountryCode || !selectedCity}
+                  disabled={isChangingLocation || !selectedCountryCode}
                   className="mt-3 inline-flex min-h-11 w-full touch-manipulation items-center justify-center gap-2 rounded-2xl border border-cyan-300/40 bg-gradient-to-r from-cyan-500/30 to-blue-500/30 px-4 py-2.5 text-sm font-semibold text-cyan-100 transition-colors duration-200 active:from-cyan-500/45 active:to-blue-500/45 disabled:cursor-not-allowed disabled:opacity-60"
                 >
                   <GlobeIcon className="h-4 w-4" />
@@ -1128,7 +910,7 @@ export default function DashboardPage() {
             <span className="text-slate-300">
               Connected to Server:{" "}
               <span className="font-semibold text-cyan-300">
-                {connectedCityLabel}, {connectedCountryLabel}
+                {connectedCountryLabel}
               </span>
             </span>
           </div>
@@ -1363,7 +1145,7 @@ export default function DashboardPage() {
             <GlobeIcon className="h-6 w-6" />
           </span>
           <p className="text-xs leading-relaxed text-slate-300">
-            Live feed and matchmaking are now bound to your selected global city server.
+            Live feed and matchmaking are now bound to your selected country server.
           </p>
         </div>
       </section>

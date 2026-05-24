@@ -47,7 +47,6 @@ class User(Base):
     age: Mapped[int | None] = mapped_column(Integer, nullable=True)
     country_code: Mapped[str | None] = mapped_column(String(2), nullable=True, index=True)
     country_name: Mapped[str | None] = mapped_column(String(80), nullable=True)
-    city: Mapped[str | None] = mapped_column(String(120), nullable=True, index=True)
     latitude: Mapped[float | None] = mapped_column(Float, nullable=True, index=True)
     longitude: Mapped[float | None] = mapped_column(Float, nullable=True, index=True)
     otp_verified: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=false())

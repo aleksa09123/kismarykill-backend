@@ -52,13 +52,11 @@ class UserRepository:
         *,
         country_code: str,
         country_name: str,
-        city: str,
         latitude: float,
         longitude: float,
     ) -> None:
         user.country_code = country_code
         user.country_name = country_name
-        user.city = city
         user.latitude = latitude
         user.longitude = longitude
         user.koordinati = _point_wkt(latitude=latitude, longitude=longitude)
@@ -209,12 +207,10 @@ class UserRepository:
         current_user_id: int,
         required_gender: str,
         country_code: str,
-        city: str,
         latitude: float,
         longitude: float,
         limit: int,
         exclude_user_ids: set[int] | None = None,
-        city_only: bool = True,
         include_bots: bool = True,
         include_humans: bool = True,
     ) -> list[SimpleNamespace]:
@@ -247,8 +243,6 @@ class UserRepository:
             stmt = stmt.where(User.is_bot.is_(False))
 
         stmt = stmt.where(User.country_code == country_code)
-        if city_only:
-            stmt = stmt.where(User.city == city)
 
         rows = (await self.session.execute(stmt)).all()
         candidates: list[SimpleNamespace] = []
@@ -290,14 +284,12 @@ class UserRepository:
         self,
         *,
         country_code: str,
-        city: str,
         exclude_user_id: int | None = None,
     ) -> int:
         stmt = (
             select(func.count(User.id))
             .where(User.is_bot.is_(False))
             .where(User.country_code == country_code)
-            .where(User.city == city)
         )
         if exclude_user_id is not None:
             stmt = stmt.where(User.id != exclude_user_id)

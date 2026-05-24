@@ -10,7 +10,7 @@ from app.core.config import settings
 
 
 OTP_EXPIRATION_MINUTES = 10
-OTP_EMAIL_FROM = "onboarding@resend.dev"
+OTP_EMAIL_FROM = "welcome@kissmerrykil.com"
 logger = logging.getLogger(__name__)
 
 
@@ -20,6 +20,7 @@ class PendingRegistration:
     name: str
     gender: str
     preferred_gender: str
+    country_code: str | None
     password_hash: str
     verification_code: str
     expires_at: datetime
@@ -47,6 +48,7 @@ def create_pending_registration(
     name: str,
     gender: str,
     preferred_gender: str,
+    country_code: str | None,
     password_hash: str,
 ) -> PendingRegistration:
     normalized_email = _normalize_email(email)
@@ -58,6 +60,7 @@ def create_pending_registration(
         name=name,
         gender=gender,
         preferred_gender=preferred_gender,
+        country_code=country_code.strip().upper() if country_code else None,
         password_hash=password_hash,
         verification_code=verification_code,
         expires_at=expires_at,

@@ -1,9 +1,10 @@
 "use client";
 
 import { motion } from "framer-motion";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import Image from "next/image";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import { fetchRound, submitRoundVotes } from "@/lib/api";
+import { fetchRound, fetchRoundBatch, submitRoundVotes } from "@/lib/api";
 import { ENABLE_API_BOTS } from "@/lib/feature-flags";
 import {
   VIP_MEN,
@@ -11,7 +12,7 @@ import {
   VIP_WOMEN,
   type VIPCelebrity
 } from "@/lib/vip-data";
-import type { AuthUser, RoundUser, VoteType } from "@/lib/types";
+import type { AuthUser, GetRoundResponse, RoundUser, VoteType } from "@/lib/types";
 
 const actionStyle: Record<VoteType, string> = {
   kiss: "border-rose-300/50 bg-[#241226]/90 text-rose-200",
@@ -44,10 +45,14 @@ const badgeStyle: Record<VoteType, string> = {
 };
 
 const ROUND_SIZE = 3;
+const ROUND_BATCH_SIZE = 18;
+const ROUND_BATCH_LOW_WATERMARK = 6;
 const INTERSTITIAL_AD_ROUND_INTERVAL = 7;
 const INTERSTITIAL_AD_CLOSE_DELAY_MS = 1600;
 const VIP_ROOM_ID = "vip_global";
 const FALLBACK_PROFILE_IMAGE_URL = VIP_PORTRAIT_FALLBACK_URL;
+const CARD_IMAGE_WIDTH = 760;
+const CARD_IMAGE_HEIGHT = 1000;
 const ADSENSE_CLIENT_ID = "ca-pub-1680175309169171";
 const ADSENSE_INTERSTITIAL_SLOT_ID = process.env.NEXT_PUBLIC_ADSENSE_INTERSTITIAL_SLOT_ID?.trim() ?? "";
 const ensureArray = <T,>(items: T[] | null | undefined): T[] => (Array.isArray(items) ? items : []);
@@ -197,6 +202,11 @@ const toVipRoundUsers = (celebrities: VIPCelebrity[] | null | undefined): RoundU
     distance_km: Number((Math.random() * 9 + 0.5).toFixed(1))
   }));
 
+const normalizeRoundResponse = (candidate: GetRoundResponse | null | undefined): GetRoundResponse => ({
+  zone_id: typeof candidate?.zone_id === "string" ? candidate.zone_id : "",
+  users: ensureArray(candidate?.users).map(normalizeRoundUser).slice(0, ROUND_SIZE)
+});
+
 export function GameRound({
   accessToken,
   currentUser,
@@ -224,6 +234,66 @@ export function GameRound({
   const isVipMode = mode === "vip";
   const isAdSlotConfigured = ADSENSE_INTERSTITIAL_SLOT_ID.length > 0;
   const vipPool = useMemo(() => (currentUser.gender === "male" ? VIP_WOMEN : VIP_MEN), [currentUser.gender]);
+  const roundCacheRef = useRef<GetRoundResponse[]>([]);
+  const isBatchPrefetchingRef = useRef(false);
+  const [cachedRoundCount, setCachedRoundCount] = useState(0);
+
+  const syncCachedRoundCount = useCallback(() => {
+    setCachedRoundCount(roundCacheRef.current.length);
+  }, []);
+
+  const appendToRoundCache = useCallback(
+    (rounds: GetRoundResponse[] | null | undefined): number => {
+      const normalizedRounds = ensureArray(rounds)
+        .map((round) => normalizeRoundResponse(round))
+        .filter((round) => round.users.length === ROUND_SIZE);
+      if (normalizedRounds.length === 0) {
+        return 0;
+      }
+      roundCacheRef.current.push(...normalizedRounds);
+      syncCachedRoundCount();
+      return normalizedRounds.length;
+    },
+    [syncCachedRoundCount]
+  );
+
+  const pullNextCachedRound = useCallback((): GetRoundResponse | null => {
+    const next = roundCacheRef.current.shift() ?? null;
+    syncCachedRoundCount();
+    return next;
+  }, [syncCachedRoundCount]);
+
+  const maybePrefetchBatchRounds = useCallback(
+    async ({ force = false, silent = false }: { force?: boolean; silent?: boolean } = {}): Promise<void> => {
+      if (isVipMode) {
+        return;
+      }
+
+      const cacheSize = roundCacheRef.current.length;
+      if (!force && cacheSize >= ROUND_BATCH_LOW_WATERMARK) {
+        return;
+      }
+      if (isBatchPrefetchingRef.current) {
+        return;
+      }
+
+      isBatchPrefetchingRef.current = true;
+      try {
+        const batchResponse = await fetchRoundBatch(accessToken, ROUND_BATCH_SIZE);
+        const added = appendToRoundCache(batchResponse?.rounds);
+        if (added === 0 && !silent && cacheSize === 0) {
+          setInfo("No fresh profiles right now. Retrying...");
+        }
+      } catch {
+        if (!silent) {
+          setInfo("Temporary network issue detected. Recovering in the background...");
+        }
+      } finally {
+        isBatchPrefetchingRef.current = false;
+      }
+    },
+    [accessToken, appendToRoundCache, isVipMode]
+  );
 
   const loadRound = useCallback(
     async () => {
@@ -254,16 +324,41 @@ export function GameRound({
       }
 
       try {
-        const response = await fetchRound(accessToken);
-        const nextUsers = ensureArray(response?.users).map(normalizeRoundUser);
-        setUsers(nextUsers.slice(0, ROUND_SIZE));
+        let nextRound = pullNextCachedRound();
+        if (!nextRound) {
+          try {
+            const batchResponse = await fetchRoundBatch(accessToken, ROUND_BATCH_SIZE);
+            appendToRoundCache(batchResponse?.rounds);
+            nextRound = pullNextCachedRound();
+          } catch {
+            nextRound = null;
+          }
+        }
+
+        if (!nextRound) {
+          const fallbackResponse = await fetchRound(accessToken);
+          nextRound = normalizeRoundResponse(fallbackResponse);
+          setInfo("Network hiccup detected. Loaded a fallback round.");
+        }
+
+        const normalizedRound = normalizeRoundResponse(nextRound);
+        if (normalizedRound.users.length !== ROUND_SIZE) {
+          throw new Error(
+            ENABLE_API_BOTS
+              ? "Not enough profiles right now. More bots/users will appear as activity grows."
+              : "No local profiles are available yet. API bots are currently paused, so only real players are shown."
+          );
+        }
+
+        setUsers(normalizedRound.users);
         setRoundKey((previous) => previous + 1);
         setZoneId((previousZoneId) => {
-          if (previousZoneId && previousZoneId !== response.zone_id) {
+          if (previousZoneId && previousZoneId !== normalizedRound.zone_id) {
             setInfo("Moved to a new room. Refreshing your local server feed.");
           }
-          return response.zone_id;
+          return normalizedRound.zone_id;
         });
+        void maybePrefetchBatchRounds({ silent: true });
       } catch (roundError) {
         const message = roundError instanceof Error ? roundError.message : "Could not load the round.";
         setError(message);
@@ -272,12 +367,27 @@ export function GameRound({
         setIsLoadingRound(false);
       }
     },
-    [accessToken, isVipMode, vipPool]
+    [accessToken, appendToRoundCache, isVipMode, maybePrefetchBatchRounds, pullNextCachedRound, vipPool]
   );
+
+  useEffect(() => {
+    roundCacheRef.current = [];
+    isBatchPrefetchingRef.current = false;
+    syncCachedRoundCount();
+  }, [accessToken, isVipMode, syncCachedRoundCount]);
 
   useEffect(() => {
     void loadRound();
   }, [loadRound]);
+
+  useEffect(() => {
+    if (isVipMode) {
+      return;
+    }
+    if (cachedRoundCount < ROUND_BATCH_LOW_WATERMARK) {
+      void maybePrefetchBatchRounds({ silent: true });
+    }
+  }, [cachedRoundCount, isVipMode, maybePrefetchBatchRounds]);
 
   useEffect(() => {
     if (!isInterstitialAdVisible) {
