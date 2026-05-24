@@ -4,8 +4,9 @@ import os
 import sys
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 import httpx
 from supabase import Client, create_client
@@ -20,9 +21,11 @@ from app.api.routes.leaderboard import router as leaderboard_router
 from app.api.routes.location import router as location_router
 from app.api.routes.rounds import router as rounds_router
 from app.api.routes.votes import router as votes_router
+from app.core.auth import UserNotFoundForTokenError
 from app.core.config import settings
 from app.core.database import AsyncSessionLocal, init_db
 from app.services.bot_simulation import ENABLE_API_BOTS, BotSimulationService
+from app.services.countries_sync import ensure_countries_seeded
 
 
 def _create_supabase_client() -> tuple[Client | None, httpx.Client | None]:
@@ -85,6 +88,8 @@ async def lifespan(app: FastAPI):
     app.state.supabase = supabase_client
     app.state.supabase_http_client = supabase_http_client
     await init_db()
+    async with AsyncSessionLocal() as session:
+        await ensure_countries_seeded(session=session)
     if ENABLE_API_BOTS:
         async with AsyncSessionLocal() as session:
             bot_service = BotSimulationService(session)
@@ -127,6 +132,17 @@ app.include_router(leaderboard_router)
 app.include_router(location_router)
 app.include_router(rounds_router)
 app.include_router(votes_router)
+
+
+@app.exception_handler(UserNotFoundForTokenError)
+async def user_not_found_for_token_handler(_: Request, __: UserNotFoundForTokenError) -> JSONResponse:
+    return JSONResponse(
+        status_code=401,
+        content={
+            "detail": "user_not_found",
+            "error": "User not found for this token",
+        },
+    )
 
 
 @app.get("/health", tags=["health"])

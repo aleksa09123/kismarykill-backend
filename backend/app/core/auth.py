@@ -22,6 +22,10 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/login")
 logger = logging.getLogger(__name__)
 
 
+class UserNotFoundForTokenError(Exception):
+    """Raised when JWT is valid but the referenced user no longer exists."""
+
+
 def hash_password(password: str) -> str:
     return pwd_context.hash(password)
 
@@ -237,10 +241,7 @@ async def get_current_user(
                     status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                     detail="Authentication sync is temporarily unavailable. Please retry.",
                 ) from last_exception
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="User profile sync pending. Please retry in a moment.",
-            )
+            raise UserNotFoundForTokenError
 
         try:
             user = await _sync_local_user_from_supabase_row(session=session, user_row=user_row)
@@ -253,8 +254,5 @@ async def get_current_user(
             ) from exc
 
     if user is None:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="User profile sync pending. Please retry in a moment.",
-        )
+        raise UserNotFoundForTokenError
     return user

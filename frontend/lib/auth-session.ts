@@ -6,6 +6,7 @@ export const AUTH_STORAGE_KEY = "kmk_auth_session";
 const PLACEHOLDER_TOKENS = ["placeholder", "default-avatar", "/default-avatar", "avatar-default"];
 let sessionMemoryCache: AuthResponse | null | undefined;
 let ongoingSilentRecovery: Promise<boolean> | null = null;
+let hardResetInProgress = false;
 
 function parseStoredSession(raw: string): AuthResponse | null {
   try {
@@ -59,6 +60,28 @@ export function clearSession(): void {
     return;
   }
   window.localStorage.removeItem(AUTH_STORAGE_KEY);
+}
+
+export function hardResetAuthStateAndReload(): void {
+  sessionMemoryCache = null;
+  if (typeof window === "undefined") {
+    return;
+  }
+  if (hardResetInProgress) {
+    return;
+  }
+  hardResetInProgress = true;
+  try {
+    window.localStorage.clear();
+  } catch {
+    window.localStorage.removeItem(AUTH_STORAGE_KEY);
+  }
+  try {
+    window.sessionStorage.clear();
+  } catch {
+    // Best effort only.
+  }
+  window.location.reload();
 }
 
 export function patchSessionUser(nextUser: AuthUser): AuthResponse | null {

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -14,6 +14,7 @@ from app.core.location_context import (
 )
 from app.models.user import User
 from app.services.bot_simulation import BOT_TARGET_COUNT, ENABLE_API_BOTS, LOCAL_AI_BOT_TARGET_COUNT, BotSimulationService
+from app.services.countries_sync import list_countries_from_db, sync_countries_from_remote
 
 router = APIRouter(prefix="/location", tags=["location"])
 
@@ -42,8 +43,36 @@ def _response_from_context(country_code: str, country_name: str, latitude: float
 
 
 @router.get("/options")
-async def get_location_options() -> list[dict[str, object]]:
+async def get_location_options(
+    session: AsyncSession = Depends(get_async_session),
+) -> list[dict[str, object]]:
+    db_options = await list_countries_from_db(session)
+    if db_options:
+        return [
+            {"country_code": "GL", "country_name": "Global"},
+            *[item for item in db_options if item["country_code"] != "GL"],
+        ]
     return available_locations_payload()
+
+
+@router.post("/admin/sync-countries")
+async def sync_countries_catalog(
+    session: AsyncSession = Depends(get_async_session),
+    _: User = Depends(get_current_user),
+) -> dict[str, object]:
+    try:
+        inserted = await sync_countries_from_remote(session)
+    except Exception as exc:
+        await session.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"countries_sync_failed: {exc}",
+        ) from exc
+    return {
+        "status": "ok",
+        "inserted": inserted,
+        "source": "https://restcountries.com/v3.1/all?fields=name,cca2",
+    }
 
 
 @router.get("/current", response_model=LocationSelectionResponse)

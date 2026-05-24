@@ -15,7 +15,7 @@ import type {
   VoteRoundRequest,
   VoteRoundResponse
 } from "@/lib/types";
-import { readSession, recoverSessionSilently } from "@/lib/auth-session";
+import { hardResetAuthStateAndReload } from "@/lib/auth-session";
 
 const rawApiBaseUrl = process.env.NEXT_PUBLIC_API_URL?.trim() ?? "";
 export const API_BASE_URL = rawApiBaseUrl.replace(/\/+$/, "");
@@ -75,6 +75,68 @@ function alertConnectingToApi(): void {
   }
 }
 
+function containsUserNotFoundSignal(raw: unknown): boolean {
+  if (raw === null || raw === undefined) {
+    return false;
+  }
+  const normalized = String(raw).trim().toLowerCase();
+  if (!normalized) {
+    return false;
+  }
+  return normalized.includes("user_not_found") || normalized.includes("user not found");
+}
+
+function shouldResetAuthState(
+  params: {
+    status: number;
+    detail: unknown;
+    error: unknown;
+    hadAuthorizationToken: boolean;
+  }
+): boolean {
+  const { status, detail, error, hadAuthorizationToken } = params;
+  if (containsUserNotFoundSignal(detail) || containsUserNotFoundSignal(error)) {
+    return true;
+  }
+  if (!hadAuthorizationToken) {
+    return false;
+  }
+  return status === 401 || status === 404;
+}
+
+async function buildApiError(response: Response): Promise<{
+  status: number;
+  message: string;
+  detail: unknown;
+  error: unknown;
+}> {
+  const contentType = response.headers.get("content-type") ?? "";
+  if (contentType.includes("application/json")) {
+    const errorBody = (await response.json()) as { detail?: unknown; error?: unknown };
+    const detail = errorBody.detail;
+    const error = errorBody.error;
+    const message =
+      errorMessageFromUnknown(detail) ??
+      errorMessageFromUnknown(error) ??
+      `Request failed with status ${response.status}`;
+    return {
+      status: response.status,
+      message,
+      detail,
+      error,
+    };
+  }
+
+  const rawText = await response.text();
+  const message = rawText || `Request failed with status ${response.status}`;
+  return {
+    status: response.status,
+    message,
+    detail: rawText,
+    error: null,
+  };
+}
+
 async function request<T>(path: string, init: RequestInit, accessToken?: string): Promise<T> {
   if (!API_BASE_URL) {
     throw new ApiRequestError(
@@ -109,25 +171,23 @@ async function request<T>(path: string, init: RequestInit, accessToken?: string)
     }
   };
 
-  let tokenForRequest = accessToken;
-  let response = await fetchOnce(tokenForRequest);
-  if (response.status === 401 && tokenForRequest) {
-    await recoverSessionSilently();
-    const refreshedSession = readSession();
-    tokenForRequest = refreshedSession?.access_token?.trim() || tokenForRequest;
-    response = await fetchOnce(tokenForRequest);
-  }
+  const tokenForRequest = accessToken;
+  const hadAuthorizationToken = Boolean(tokenForRequest?.trim());
+  const response = await fetchOnce(tokenForRequest);
 
   if (!response.ok) {
-    const contentType = response.headers.get("content-type") ?? "";
-    if (contentType.includes("application/json")) {
-      const errorBody = (await response.json()) as { detail?: unknown };
-      const backendMessage = errorMessageFromUnknown(errorBody.detail);
-      throw new ApiRequestError(backendMessage ?? `Request failed with status ${response.status}`, response.status);
+    const apiError = await buildApiError(response);
+    if (
+      shouldResetAuthState({
+        status: apiError.status,
+        detail: apiError.detail,
+        error: apiError.error,
+        hadAuthorizationToken,
+      })
+    ) {
+      hardResetAuthStateAndReload();
     }
-
-    const errorPayload = await response.text();
-    throw new ApiRequestError(errorPayload || `Request failed with status ${response.status}`, response.status);
+    throw new ApiRequestError(apiError.message, apiError.status);
   }
 
   return (await response.json()) as T;
@@ -324,26 +384,23 @@ export async function uploadProfilePicture(file: File, accessToken: string): Pro
   };
 
   try {
-    let tokenForRequest = accessToken;
-    let response = await fetchUploadOnce(tokenForRequest);
-
-    if (response.status === 401 && tokenForRequest) {
-      await recoverSessionSilently();
-      const refreshedSession = readSession();
-      tokenForRequest = refreshedSession?.access_token?.trim() || tokenForRequest;
-      response = await fetchUploadOnce(tokenForRequest);
-    }
+    const tokenForRequest = accessToken;
+    const hadAuthorizationToken = Boolean(tokenForRequest?.trim());
+    const response = await fetchUploadOnce(tokenForRequest);
 
     if (!response.ok) {
-      const contentType = response.headers.get("content-type") ?? "";
-      if (contentType.includes("application/json")) {
-        const errorBody = (await response.json()) as { detail?: unknown };
-        const backendMessage = errorMessageFromUnknown(errorBody.detail);
-        throw new ApiRequestError(backendMessage ?? `Request failed with status ${response.status}`, response.status);
+      const apiError = await buildApiError(response);
+      if (
+        shouldResetAuthState({
+          status: apiError.status,
+          detail: apiError.detail,
+          error: apiError.error,
+          hadAuthorizationToken,
+        })
+      ) {
+        hardResetAuthStateAndReload();
       }
-
-      const errorPayload = await response.text();
-      throw new ApiRequestError(errorPayload || `Request failed with status ${response.status}`, response.status);
+      throw new ApiRequestError(apiError.message, apiError.status);
     }
 
     return (await response.json()) as AuthUser;
