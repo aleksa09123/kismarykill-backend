@@ -195,6 +195,14 @@ def decode_access_token(token: str) -> int:
         return int(subject)
     except (InvalidTokenError, ValueError):
         raise credentials_exception
+    except Exception as exc:
+        print(f"AUTH ERROR: {str(exc)}")
+        logger.exception("Unexpected error while decoding access token")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication service is temporarily unavailable",
+            headers={"WWW-Authenticate": "Bearer"},
+        ) from exc
 
 
 async def get_current_user(
@@ -202,57 +210,74 @@ async def get_current_user(
     token: str = Depends(oauth2_scheme),
     session: AsyncSession = Depends(get_async_session),
 ) -> User:
-    user_id = decode_access_token(token)
-    user = (await session.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
-    if user is None:
-        supabase_client = getattr(request.app.state, "supabase", None)
-        if supabase_client is None:
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="Authentication service is temporarily unavailable. Please retry.",
-            )
-
-        user_row: dict[str, object] | None = None
-        last_exception: Exception | None = None
-        for attempt in range(2):
-            try:
-                response = (
-                    supabase_client.table("users")
-                    .select("*")
-                    .eq("id", user_id)
-                    .maybe_single()
-                    .execute()
-                )
-                user_row = _extract_supabase_row(response)
-                if user_row is not None:
-                    break
-            except Exception as exc:
-                last_exception = exc
-                logger.exception(
-                    "Failed to fetch Supabase user by id during token hydration",
-                    extra={"user_id": user_id, "attempt": attempt + 1},
-                )
-                if attempt == 0:
-                    await asyncio.sleep(0.15)
-
-        if user_row is None:
-            if last_exception is not None:
+    try:
+        user_id = decode_access_token(token)
+        user = (await session.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
+        if user is None:
+            supabase_client = getattr(request.app.state, "supabase", None)
+            if supabase_client is None:
                 raise HTTPException(
-                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                    detail="Authentication sync is temporarily unavailable. Please retry.",
-                ) from last_exception
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Authentication service is temporarily unavailable",
+                )
+
+            user_row: dict[str, object] | None = None
+            last_exception: Exception | None = None
+            for attempt in range(2):
+                try:
+                    response = (
+                        supabase_client.table("users")
+                        .select("*")
+                        .eq("id", user_id)
+                        .maybe_single()
+                        .execute()
+                    )
+                    user_row = _extract_supabase_row(response)
+                    if user_row is not None:
+                        break
+                except Exception as exc:
+                    last_exception = exc
+                    logger.exception(
+                        "Failed to fetch Supabase user by id during token hydration",
+                        extra={"user_id": user_id, "attempt": attempt + 1},
+                    )
+                    if attempt == 0:
+                        await asyncio.sleep(0.15)
+
+            if user_row is None:
+                if last_exception is not None:
+                    raise HTTPException(
+                        status_code=status.HTTP_401_UNAUTHORIZED,
+                        detail="Authentication service is temporarily unavailable",
+                    ) from last_exception
+                raise UserNotFoundForTokenError
+
+            try:
+                user = await _sync_local_user_from_supabase_row(session=session, user_row=user_row)
+            except Exception as exc:
+                await session.rollback()
+                logger.exception("Failed to sync local user from Supabase row", extra={"user_id": user_id})
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Authentication service is temporarily unavailable",
+                ) from exc
+
+        if user is None:
             raise UserNotFoundForTokenError
-
+        return user
+    except HTTPException:
+        raise
+    except UserNotFoundForTokenError:
+        raise
+    except Exception as exc:
+        print(f"AUTH ERROR: {str(exc)}")
+        logger.exception("Unexpected authentication dependency error")
         try:
-            user = await _sync_local_user_from_supabase_row(session=session, user_row=user_row)
-        except Exception as exc:
             await session.rollback()
-            logger.exception("Failed to sync local user from Supabase row", extra={"user_id": user_id})
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="Authentication sync is temporarily unavailable. Please retry.",
-            ) from exc
-
-    if user is None:
-        raise UserNotFoundForTokenError
-    return user
+        except Exception as rollback_exc:
+            print(f"AUTH ERROR: rollback failed: {str(rollback_exc)}")
+            logger.exception("Failed to rollback session after auth failure")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication service is temporarily unavailable",
+        ) from exc
