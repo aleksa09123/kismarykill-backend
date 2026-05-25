@@ -11,3 +11,7 @@ __pycache__/
 
 .vercel
 .env*
+
+backend/.pytest_cache/
+
+backend/.pytest_cache/
