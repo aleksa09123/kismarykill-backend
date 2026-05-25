@@ -4,7 +4,7 @@ import os
 import sys
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -26,6 +26,7 @@ from app.core.config import settings
 from app.core.database import AsyncSessionLocal, init_db
 from app.services.bot_simulation import ENABLE_API_BOTS, BotSimulationService
 from app.services.countries_sync import ensure_countries_seeded
+from app.services.live_manager import LiveConnectionManager, SIGNALING_TYPES
 
 
 def _create_supabase_client() -> tuple[Client | None, httpx.Client | None]:
@@ -108,6 +109,7 @@ app = FastAPI(
     version="0.1.0",
     lifespan=lifespan,
 )
+live_connection_manager = LiveConnectionManager()
 
 uploads_dir = os.path.join(BACKEND_DIR, "uploads")
 os.makedirs(uploads_dir, exist_ok=True)
@@ -164,6 +166,83 @@ def read_root() -> dict[str, str]:
 @app.get("/api")
 def read_api_root() -> dict[str, str]:
     return {"status": "ok", "poruka": "API koren radi"}
+
+
+@app.websocket("/ws/live/{user_id}")
+async def live_mode_socket(websocket: WebSocket, user_id: int) -> None:
+    await live_connection_manager.connect(user_id, websocket)
+    try:
+        while True:
+            try:
+                payload = await websocket.receive_json()
+            except WebSocketDisconnect:
+                raise
+            except Exception:
+                await websocket.send_json(
+                    {
+                        "type": "error",
+                        "detail": "invalid_json_payload",
+                    }
+                )
+                continue
+
+            if not isinstance(payload, dict):
+                await websocket.send_json(
+                    {
+                        "type": "error",
+                        "detail": "payload_must_be_object",
+                    }
+                )
+                continue
+
+            action = str(payload.get("type") or payload.get("action") or "").strip().lower()
+            if action == "join_queue":
+                await live_connection_manager.join_queue(
+                    user_id=user_id,
+                    role=str(payload.get("role") or ""),
+                    gender=payload.get("gender"),
+                    preferred_gender=payload.get("preferred_gender"),
+                    country_code=payload.get("country_code"),
+                )
+                continue
+
+            if action == "leave_queue":
+                await live_connection_manager.leave_queue(user_id=user_id)
+                continue
+
+            if action in SIGNALING_TYPES:
+                await live_connection_manager.relay_signaling_message(
+                    from_user_id=user_id,
+                    payload=payload,
+                )
+                continue
+
+            if action == "ping":
+                await websocket.send_json({"type": "pong"})
+                continue
+
+            await websocket.send_json(
+                {
+                    "type": "error",
+                    "detail": "unsupported_action",
+                    "received_action": action,
+                }
+            )
+    except WebSocketDisconnect:
+        pass
+    except Exception as exc:
+        try:
+            await websocket.send_json(
+                {
+                    "type": "error",
+                    "detail": "websocket_runtime_error",
+                    "message": str(exc),
+                }
+            )
+        except Exception:
+            pass
+    finally:
+        await live_connection_manager.disconnect(user_id)
 
 
 if __name__ == "__main__":
