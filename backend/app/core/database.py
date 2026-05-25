@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from app.core.config import BACKEND_DIR, settings
 from app.models.base import Base
+from app.models.country import Country
 from app.models.user import User
 from app.models.vote import Vote
 
@@ -82,7 +83,7 @@ engine = create_async_engine(
 AsyncSessionLocal = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 IS_SQLITE = DATABASE_URL.get_backend_name() == "sqlite"
 
-_ = (User, Vote)
+_ = (Country, User, Vote)
 
 
 async def get_async_session() -> AsyncGenerator[AsyncSession, None]:
@@ -108,8 +109,58 @@ def _ensure_runtime_columns(sync_conn: object) -> None:
     )
 
 
+def _ensure_countries_table(sync_conn: object) -> None:
+    inspector = inspect(sync_conn)
+    bind = inspector.bind
+    if bind is None:
+        return
+
+    dialect_name = bind.dialect.name
+    if dialect_name == "sqlite":
+        bind.exec_driver_sql(
+            """
+            CREATE TABLE IF NOT EXISTS countries (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                country_code VARCHAR(2) NOT NULL UNIQUE,
+                country_name VARCHAR(120) NOT NULL
+            )
+            """
+        )
+        existing_columns = {column["name"] for column in inspect(sync_conn).get_columns("countries")}
+        if "country_code" not in existing_columns:
+            bind.exec_driver_sql("ALTER TABLE countries ADD COLUMN country_code VARCHAR(2)")
+        if "country_name" not in existing_columns:
+            bind.exec_driver_sql("ALTER TABLE countries ADD COLUMN country_name VARCHAR(120)")
+        bind.exec_driver_sql(
+            "CREATE UNIQUE INDEX IF NOT EXISTS ix_countries_country_code ON countries(country_code)"
+        )
+        return
+
+    bind.exec_driver_sql(
+        """
+        CREATE TABLE IF NOT EXISTS public.countries (
+            id BIGSERIAL PRIMARY KEY,
+            country_code VARCHAR(2) NOT NULL,
+            country_name VARCHAR(120) NOT NULL,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            CONSTRAINT uq_countries_country_code UNIQUE (country_code)
+        )
+        """
+    )
+    bind.exec_driver_sql(
+        "ALTER TABLE public.countries ADD COLUMN IF NOT EXISTS country_code VARCHAR(2)"
+    )
+    bind.exec_driver_sql(
+        "ALTER TABLE public.countries ADD COLUMN IF NOT EXISTS country_name VARCHAR(120)"
+    )
+    bind.exec_driver_sql(
+        "CREATE UNIQUE INDEX IF NOT EXISTS ix_countries_country_code ON public.countries(country_code)"
+    )
+
+
 async def init_db() -> None:
     async with engine.begin() as conn:
         # Keep data between restarts so live activity can build up over time.
         await conn.run_sync(Base.metadata.create_all)
+        await conn.run_sync(_ensure_countries_table)
         await conn.run_sync(_ensure_runtime_columns)
