@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from uuid import uuid4
 
@@ -10,6 +10,13 @@ from fastapi import WebSocket
 
 LIVE_ROLES = {"judge", "contestant"}
 SIGNALING_TYPES = {"offer", "answer", "ice_candidate"}
+
+INTRO_DURATION_SECONDS = 15
+BATTLE_DURATION_SECONDS = 90
+JUDGMENT_DURATION_SECONDS = 15
+HARD_CUTOFF_SECONDS = (
+    INTRO_DURATION_SECONDS + BATTLE_DURATION_SECONDS + JUDGMENT_DURATION_SECONDS
+)
 
 
 def _normalize_gender(value: object | None) -> str:
@@ -33,6 +40,19 @@ def _normalize_country_code(value: object | None) -> str:
     return normalized
 
 
+def _normalize_bool(value: object | None, *, default: bool) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    normalized = str(value).strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    return default
+
+
 def _preference_allows(preferred_gender: str, actual_gender: str) -> bool:
     if preferred_gender == "both":
         return True
@@ -51,16 +71,38 @@ class LiveQueueEntry:
     enqueued_at: datetime
 
 
-@dataclass(frozen=True)
+@dataclass
 class LiveRoom:
     room_id: str
-    judge_id: int
-    contestant_ids: tuple[int, int, int]
+    judge_entry: LiveQueueEntry
+    contestant_entries: tuple[LiveQueueEntry, LiveQueueEntry, LiveQueueEntry]
     created_at: datetime
+    phase: str = "MATCH_FOUND"
+    started_at: datetime | None = None
+    decision_event: asyncio.Event = field(default_factory=asyncio.Event)
+    phase_task: asyncio.Task[None] | None = None
+
+    @property
+    def judge_id(self) -> int:
+        return self.judge_entry.user_id
+
+    @property
+    def contestant_ids(self) -> tuple[int, int, int]:
+        return tuple(entry.user_id for entry in self.contestant_entries)  # type: ignore[return-value]
+
+    @property
+    def participant_entries(self) -> tuple[LiveQueueEntry, ...]:
+        return (self.judge_entry, *self.contestant_entries)
 
     @property
     def participant_ids(self) -> tuple[int, ...]:
-        return (self.judge_id, *self.contestant_ids)
+        return tuple(entry.user_id for entry in self.participant_entries)
+
+    def entry_for_user(self, user_id: int) -> LiveQueueEntry | None:
+        for entry in self.participant_entries:
+            if entry.user_id == user_id:
+                return entry
+        return None
 
 
 class LiveConnectionManager:
@@ -96,12 +138,40 @@ class LiveConnectionManager:
 
     async def disconnect(self, user_id: int) -> None:
         notifications: list[tuple[int, dict[str, object]]] = []
+        room_ids_to_start: list[str] = []
         async with self._state_lock:
             self._active_connections.pop(user_id, None)
             self._remove_from_queue_locked(user_id)
-            notifications.extend(self._remove_from_room_locked(user_id))
+
+            room_id = self._room_by_user_id.get(user_id)
+            if room_id is not None:
+                room = self._rooms_by_id.get(room_id)
+                if room is not None:
+                    for participant_id in room.participant_ids:
+                        if participant_id == user_id:
+                            continue
+                        notifications.append(
+                            (
+                                participant_id,
+                                {
+                                    "type": "room_member_left",
+                                    "room_id": room_id,
+                                    "user_id": user_id,
+                                },
+                            )
+                        )
+
+                close_notifications, new_room_ids = self._close_room_locked(
+                    room_id=room_id,
+                    reason="participant_disconnected",
+                    requeue_connected=True,
+                    excluded_requeue_user_ids={user_id},
+                )
+                notifications.extend(close_notifications)
+                room_ids_to_start.extend(new_room_ids)
 
         await self._fanout_notifications(notifications)
+        await self._start_room_loops(room_ids_to_start)
 
     async def join_queue(
         self,
@@ -126,6 +196,7 @@ class LiveConnectionManager:
 
         immediate_error: dict[str, object] | None = None
         notifications: list[tuple[int, dict[str, object]]] = []
+        room_ids_to_start: list[str] = []
         async with self._state_lock:
             self._remove_from_queue_locked(user_id)
 
@@ -162,13 +233,16 @@ class LiveConnectionManager:
                     )
                 )
 
-                notifications.extend(self._consume_ready_rooms_locked())
+                match_notifications, matched_room_ids = self._consume_ready_rooms_locked()
+                notifications.extend(match_notifications)
+                room_ids_to_start.extend(matched_room_ids)
 
         if immediate_error is not None:
             await self._send_to_user(user_id, immediate_error)
             return
 
         await self._fanout_notifications(notifications)
+        await self._start_room_loops(room_ids_to_start)
 
     async def leave_queue(self, *, user_id: int) -> bool:
         removed = False
@@ -215,7 +289,6 @@ class LiveConnectionManager:
             )
             return
 
-        room_id: str | None = None
         relay_payload: dict[str, object] | None = None
         error_payload: dict[str, object] | None = None
 
@@ -265,6 +338,338 @@ class LiveConnectionManager:
             return
         await self._send_to_user(target_user_id, relay_payload)
 
+    async def submit_judge_kill_action(
+        self,
+        *,
+        judge_user_id: int,
+        payload: dict[str, object],
+    ) -> None:
+        target_user_id: int | None = None
+        participants: tuple[int, ...] | None = None
+        error_payload: dict[str, object] | None = None
+        should_mark_complete = _normalize_bool(
+            payload.get("round_complete", payload.get("is_final", payload.get("finalize"))),
+            default=True,
+        )
+
+        target_raw = payload.get("target_user_id", payload.get("user_id"))
+        try:
+            target_user_id = int(target_raw)  # type: ignore[arg-type]
+        except Exception:
+            await self._send_to_user(
+                judge_user_id,
+                {
+                    "type": "error",
+                    "detail": "invalid_target_user_id",
+                },
+            )
+            return
+
+        async with self._state_lock:
+            room_id = self._room_by_user_id.get(judge_user_id)
+            if room_id is None:
+                error_payload = {
+                    "type": "error",
+                    "detail": "judge_not_in_room",
+                }
+            room = self._rooms_by_id.get(room_id)
+            if error_payload is None:
+                if room is None:
+                    error_payload = {
+                        "type": "error",
+                        "detail": "room_not_found",
+                    }
+                elif room.judge_id != judge_user_id:
+                    error_payload = {
+                        "type": "error",
+                        "detail": "only_judge_can_eliminate",
+                    }
+                elif target_user_id not in room.contestant_ids:
+                    error_payload = {
+                        "type": "error",
+                        "detail": "target_must_be_contestant",
+                    }
+                else:
+                    participants = room.participant_ids
+                    if should_mark_complete:
+                        room.decision_event.set()
+
+        if error_payload is not None:
+            await self._send_to_user(judge_user_id, error_payload)
+            return
+
+        if participants is None or target_user_id is None:
+            return
+
+        notifications: list[tuple[int, dict[str, object]]] = []
+        for participant_id in participants:
+            if participant_id == target_user_id:
+                continue
+            notifications.append(
+                (
+                    participant_id,
+                    {
+                        "type": "user_eliminated",
+                        "user_id": target_user_id,
+                    },
+                )
+            )
+        await self._fanout_notifications(notifications)
+
+    async def mark_judgment_complete(self, *, judge_user_id: int) -> None:
+        error_payload: dict[str, object] | None = None
+        async with self._state_lock:
+            room_id = self._room_by_user_id.get(judge_user_id)
+            if room_id is None:
+                error_payload = {
+                    "type": "error",
+                    "detail": "judge_not_in_room",
+                }
+            room = self._rooms_by_id.get(room_id)
+            if error_payload is None:
+                if room is None:
+                    error_payload = {
+                        "type": "error",
+                        "detail": "room_not_found",
+                    }
+                elif room.judge_id != judge_user_id:
+                    error_payload = {
+                        "type": "error",
+                        "detail": "only_judge_can_finalize",
+                    }
+                else:
+                    room.decision_event.set()
+
+        if error_payload is not None:
+            await self._send_to_user(judge_user_id, error_payload)
+            return
+
+        await self._send_to_user(
+            judge_user_id,
+            {
+                "type": "judgment_marked_complete",
+            },
+        )
+
+    async def _start_room_loops(self, room_ids: list[str]) -> None:
+        for room_id in room_ids:
+            await self._start_room_loop(room_id)
+
+    async def _start_room_loop(self, room_id: str) -> None:
+        async with self._state_lock:
+            room = self._rooms_by_id.get(room_id)
+            if room is None:
+                return
+            if room.phase_task is not None and not room.phase_task.done():
+                return
+            room.phase_task = asyncio.create_task(
+                self._run_room_game_loop(room_id),
+                name=f"live-room-loop-{room_id}",
+            )
+
+    async def _run_room_game_loop(self, room_id: str) -> None:
+        try:
+            room = await self._set_room_phase(
+                room_id=room_id,
+                phase="INTRO",
+                duration=INTRO_DURATION_SECONDS,
+            )
+            if room is None:
+                return
+            room.started_at = datetime.now(UTC)
+            if not await self._sleep_if_room_active(room_id, INTRO_DURATION_SECONDS):
+                return
+
+            room = await self._set_room_phase(
+                room_id=room_id,
+                phase="BATTLE",
+                duration=BATTLE_DURATION_SECONDS,
+            )
+            if room is None:
+                return
+            if not await self._sleep_if_room_active(room_id, BATTLE_DURATION_SECONDS):
+                return
+
+            room = await self._set_room_phase(
+                room_id=room_id,
+                phase="JUDGMENT",
+                duration=JUDGMENT_DURATION_SECONDS,
+            )
+            if room is None:
+                return
+
+            try:
+                await asyncio.wait_for(
+                    room.decision_event.wait(),
+                    timeout=JUDGMENT_DURATION_SECONDS,
+                )
+                await self._broadcast_to_room(
+                    room_id,
+                    {
+                        "type": "round_completed",
+                        "reason": "judge_decision_received",
+                    },
+                )
+                notifications, room_ids_to_start = await self._close_room(
+                    room_id=room_id,
+                    reason="round_completed",
+                    requeue_connected=True,
+                )
+                await self._fanout_notifications(notifications)
+                await self._start_room_loops(room_ids_to_start)
+                return
+            except asyncio.TimeoutError:
+                await self._broadcast_to_room(
+                    room_id,
+                    {
+                        "type": "force_skip",
+                        "reason": "time_expired",
+                        "hard_cutoff_seconds": HARD_CUTOFF_SECONDS,
+                    },
+                )
+                notifications, room_ids_to_start = await self._close_room(
+                    room_id=room_id,
+                    reason="time_expired",
+                    requeue_connected=True,
+                )
+                await self._fanout_notifications(notifications)
+                await self._start_room_loops(room_ids_to_start)
+                return
+        except asyncio.CancelledError:
+            return
+        except Exception as exc:
+            print(f"LIVE LOOP ERROR ({room_id}): {str(exc)}")
+            notifications, room_ids_to_start = await self._close_room(
+                room_id=room_id,
+                reason="runtime_error",
+                requeue_connected=True,
+            )
+            await self._fanout_notifications(notifications)
+            await self._start_room_loops(room_ids_to_start)
+
+    async def _set_room_phase(
+        self,
+        *,
+        room_id: str,
+        phase: str,
+        duration: int,
+    ) -> LiveRoom | None:
+        async with self._state_lock:
+            room = self._rooms_by_id.get(room_id)
+            if room is None:
+                return None
+            room.phase = phase
+            participant_ids = room.participant_ids
+
+        notifications = [
+            (
+                participant_id,
+                {
+                    "type": "phase_change",
+                    "phase": phase,
+                    "duration": duration,
+                    "room_id": room_id,
+                },
+            )
+            for participant_id in participant_ids
+        ]
+        await self._fanout_notifications(notifications)
+
+        async with self._state_lock:
+            return self._rooms_by_id.get(room_id)
+
+    async def _sleep_if_room_active(self, room_id: str, duration: int) -> bool:
+        await asyncio.sleep(duration)
+        async with self._state_lock:
+            return room_id in self._rooms_by_id
+
+    async def _broadcast_to_room(
+        self,
+        room_id: str,
+        payload: dict[str, object],
+        *,
+        exclude_user_ids: set[int] | None = None,
+    ) -> None:
+        if exclude_user_ids is None:
+            exclude_user_ids = set()
+
+        async with self._state_lock:
+            room = self._rooms_by_id.get(room_id)
+            if room is None:
+                return
+            targets = [pid for pid in room.participant_ids if pid not in exclude_user_ids]
+
+        notifications = [(participant_id, payload) for participant_id in targets]
+        await self._fanout_notifications(notifications)
+
+    async def _close_room(
+        self,
+        *,
+        room_id: str,
+        reason: str,
+        requeue_connected: bool,
+        excluded_requeue_user_ids: set[int] | None = None,
+    ) -> tuple[list[tuple[int, dict[str, object]]], list[str]]:
+        async with self._state_lock:
+            return self._close_room_locked(
+                room_id=room_id,
+                reason=reason,
+                requeue_connected=requeue_connected,
+                excluded_requeue_user_ids=excluded_requeue_user_ids,
+            )
+
+    def _close_room_locked(
+        self,
+        *,
+        room_id: str,
+        reason: str,
+        requeue_connected: bool,
+        excluded_requeue_user_ids: set[int] | None = None,
+    ) -> tuple[list[tuple[int, dict[str, object]]], list[str]]:
+        room = self._rooms_by_id.pop(room_id, None)
+        if room is None:
+            return [], []
+
+        current_task = asyncio.current_task()
+        if room.phase_task is not None and room.phase_task is not current_task:
+            room.phase_task.cancel()
+
+        for participant_id in room.participant_ids:
+            self._room_by_user_id.pop(participant_id, None)
+
+        excluded = excluded_requeue_user_ids or set()
+        notifications: list[tuple[int, dict[str, object]]] = []
+        if requeue_connected:
+            for entry in room.participant_entries:
+                if entry.user_id in excluded:
+                    continue
+                if entry.user_id not in self._active_connections:
+                    continue
+                if entry.user_id in self._queue_by_user_id:
+                    continue
+                if entry.user_id in self._room_by_user_id:
+                    continue
+
+                if entry.role == "judge":
+                    self._judge_queue.append(entry)
+                else:
+                    self._contestant_queue.append(entry)
+                self._queue_by_user_id[entry.user_id] = entry
+                notifications.append(
+                    (
+                        entry.user_id,
+                        {
+                            "type": "queue_rejoined",
+                            "reason": reason,
+                            "role": entry.role,
+                        },
+                    )
+                )
+
+        match_notifications, room_ids_to_start = self._consume_ready_rooms_locked()
+        notifications.extend(match_notifications)
+        return notifications, room_ids_to_start
+
     async def _fanout_notifications(self, notifications: list[tuple[int, dict[str, object]]]) -> None:
         if not notifications:
             return
@@ -296,35 +701,9 @@ class LiveConnectionManager:
             ]
         return True
 
-    def _remove_from_room_locked(self, user_id: int) -> list[tuple[int, dict[str, object]]]:
-        room_id = self._room_by_user_id.get(user_id)
-        if room_id is None:
-            return []
-
-        room = self._rooms_by_id.pop(room_id, None)
-        if room is None:
-            self._room_by_user_id.pop(user_id, None)
-            return []
-
+    def _consume_ready_rooms_locked(self) -> tuple[list[tuple[int, dict[str, object]]], list[str]]:
         notifications: list[tuple[int, dict[str, object]]] = []
-        for participant_id in room.participant_ids:
-            self._room_by_user_id.pop(participant_id, None)
-            if participant_id == user_id:
-                continue
-            notifications.append(
-                (
-                    participant_id,
-                    {
-                        "type": "room_member_left",
-                        "room_id": room.room_id,
-                        "user_id": user_id,
-                    },
-                )
-            )
-        return notifications
-
-    def _consume_ready_rooms_locked(self) -> list[tuple[int, dict[str, object]]]:
-        notifications: list[tuple[int, dict[str, object]]] = []
+        room_ids_to_start: list[str] = []
         while True:
             picked = self._pick_room_members_locked()
             if picked is None:
@@ -334,14 +713,15 @@ class LiveConnectionManager:
             room_id = uuid4().hex
             room = LiveRoom(
                 room_id=room_id,
-                judge_id=judge_entry.user_id,
-                contestant_ids=tuple(entry.user_id for entry in contestant_entries),  # type: ignore[arg-type]
+                judge_entry=judge_entry,
+                contestant_entries=tuple(contestant_entries),  # type: ignore[arg-type]
                 created_at=datetime.now(UTC),
             )
             self._rooms_by_id[room_id] = room
             for participant_id in room.participant_ids:
                 self._room_by_user_id[participant_id] = room_id
 
+            room_ids_to_start.append(room_id)
             notifications.append(
                 (
                     judge_entry.user_id,
@@ -366,7 +746,7 @@ class LiveConnectionManager:
                     )
                 )
 
-        return notifications
+        return notifications, room_ids_to_start
 
     def _pick_room_members_locked(self) -> tuple[LiveQueueEntry, list[LiveQueueEntry]] | None:
         if not self._judge_queue or len(self._contestant_queue) < 3:

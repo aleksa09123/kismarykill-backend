@@ -217,6 +217,19 @@ async def live_mode_socket(websocket: WebSocket, user_id: int) -> None:
                 )
                 continue
 
+            if action in {"kill", "judge_kill", "judge_eliminate", "eliminate"}:
+                await live_connection_manager.submit_judge_kill_action(
+                    judge_user_id=user_id,
+                    payload=payload,
+                )
+                continue
+
+            if action in {"judgment_complete", "judge_complete", "judge_done"}:
+                await live_connection_manager.mark_judgment_complete(
+                    judge_user_id=user_id,
+                )
+                continue
+
             if action == "ping":
                 await websocket.send_json({"type": "pong"})
                 continue
