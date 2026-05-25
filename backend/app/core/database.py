@@ -10,9 +10,6 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from app.core.config import BACKEND_DIR, settings
 from app.models.base import Base
-from app.models.country import Country
-from app.models.user import User
-from app.models.vote import Vote
 
 
 def _query_value(value: str | tuple[str, ...] | None) -> str | None:
@@ -83,21 +80,27 @@ engine = create_async_engine(
 AsyncSessionLocal = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 IS_SQLITE = DATABASE_URL.get_backend_name() == "sqlite"
 
-_ = (Country, User, Vote)
-
-
 async def get_async_session() -> AsyncGenerator[AsyncSession, None]:
-    async with AsyncSessionLocal() as session:
+    session = AsyncSessionLocal()
+    try:
         yield session
+    finally:
+        await session.close()
 
 
 def _ensure_runtime_columns(sync_conn: object) -> None:
     inspector = inspect(sync_conn)
-    existing_columns = {column["name"] for column in inspector.get_columns("users")}
+    dialect_name = inspector.bind.dialect.name if inspector.bind is not None else ""
+    users_schema = None if dialect_name == "sqlite" else "public"
+    if not inspector.has_table("users", schema=users_schema):
+        return
+
+    existing_columns = {
+        column["name"] for column in inspector.get_columns("users", schema=users_schema)
+    }
     if "is_premium" in existing_columns:
         return
 
-    dialect_name = inspector.bind.dialect.name if inspector.bind is not None else ""
     if dialect_name == "sqlite":
         inspector.bind.exec_driver_sql(
             "ALTER TABLE users ADD COLUMN is_premium BOOLEAN NOT NULL DEFAULT 0"
@@ -159,6 +162,13 @@ def _ensure_countries_table(sync_conn: object) -> None:
 
 
 async def init_db() -> None:
+    # Import models lazily to avoid accidental circular imports during module load,
+    # while still guaranteeing metadata is populated before create_all().
+    from app.models.country import Country
+    from app.models.user import User
+    from app.models.vote import Vote
+
+    _ = (Country, User, Vote)
     async with engine.begin() as conn:
         # Keep data between restarts so live activity can build up over time.
         await conn.run_sync(Base.metadata.create_all)
