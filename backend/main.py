@@ -156,6 +156,16 @@ async def health_check() -> dict[str, str]:
     return {"status": "ok"}
 
 
+@app.get("/")
+def read_root() -> dict[str, str]:
+    return {"status": "ok", "poruka": "Koren radi"}
+
+
+@app.get("/api")
+def read_api_root() -> dict[str, str]:
+    return {"status": "ok", "poruka": "API koren radi"}
+
+
 if __name__ == "__main__":
     import uvicorn
 
