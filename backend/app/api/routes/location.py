@@ -58,7 +58,6 @@ async def get_location_options(
 @router.post("/admin/sync-countries")
 async def sync_countries_catalog(
     session: AsyncSession = Depends(get_async_session),
-    _: User = Depends(get_current_user),
 ) -> dict[str, object]:
     try:
         inserted = await sync_countries_from_remote(session)

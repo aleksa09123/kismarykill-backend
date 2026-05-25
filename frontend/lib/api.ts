@@ -101,7 +101,7 @@ function shouldResetAuthState(
   if (!hadAuthorizationToken) {
     return false;
   }
-  return status === 401 || status === 404;
+  return status === 401;
 }
 
 async function buildApiError(response: Response): Promise<{

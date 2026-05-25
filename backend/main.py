@@ -133,6 +133,12 @@ app.include_router(location_router)
 app.include_router(rounds_router)
 app.include_router(votes_router)
 
+# Backward-compatible aliases for deployments/frontends that call API endpoints with `/api` prefix.
+app.include_router(leaderboard_router, prefix="/api", include_in_schema=False)
+app.include_router(location_router, prefix="/api", include_in_schema=False)
+app.include_router(rounds_router, prefix="/api", include_in_schema=False)
+app.include_router(votes_router, prefix="/api", include_in_schema=False)
+
 
 @app.exception_handler(UserNotFoundForTokenError)
 async def user_not_found_for_token_handler(_: Request, __: UserNotFoundForTokenError) -> JSONResponse:
